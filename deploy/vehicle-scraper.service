@@ -1,0 +1,13 @@
+[Unit]
+Description=Vehicle Market Price Scraper
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=scraper
+WorkingDirectory=/opt/mobile-scraper
+EnvironmentFile=/opt/mobile-scraper/.env
+ExecStart=/opt/mobile-scraper/venv/bin/python main.py
+TimeoutStartSec=600
+StandardOutput=journal
+StandardError=journal
