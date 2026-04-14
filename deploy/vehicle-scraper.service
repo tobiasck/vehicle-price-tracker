@@ -8,6 +8,7 @@ User=scraper
 WorkingDirectory=/opt/mobile-scraper
 EnvironmentFile=/opt/mobile-scraper/.env
 ExecStart=/opt/mobile-scraper/venv/bin/python main.py
+ExecStartPost=/opt/mobile-scraper/venv/bin/python report.py
 TimeoutStartSec=600
 StandardOutput=journal
 StandardError=journal
