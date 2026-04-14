@@ -74,6 +74,6 @@ INSERT INTO search_configs (vehicle_id, platform, search_url, active) VALUES
     (
         (SELECT id FROM vehicles WHERE name = 'Honda CB 750 Four'),
         'autoscout24',
-        'https://www.autoscout24.de/motorrad/honda/cb-750-four?fregfrom=1969&fregto=1978&sort=standard&desc=0',
+        'https://www.autoscout24.de/lst-moto/honda/cb-750-four?fregfrom=1969&fregto=1978&sort=standard&desc=0',
         TRUE
     );

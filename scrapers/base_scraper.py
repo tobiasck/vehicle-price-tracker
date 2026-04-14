@@ -44,8 +44,7 @@ class BaseScraper(ABC):
             page = await context.new_page()
 
             try:
-                await self._navigate_with_retry(page, self.search_url)
-                await self.dismiss_consent(page)
+                await self.navigate_to_search(page)
                 await random_page_delay()
 
                 page_num = 1
@@ -95,6 +94,11 @@ class BaseScraper(ABC):
 
         return total_listings
 
+    async def navigate_to_search(self, page):
+        """Navigate to search URL. Override in subclasses for custom navigation."""
+        await self._navigate_with_retry(page, self.search_url)
+        await self.dismiss_consent(page)
+
     async def _navigate_with_retry(self, page, url):
         for attempt in range(MAX_RETRIES + 1):
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -132,7 +136,7 @@ class BaseScraper(ABC):
         # Check for explicit block pages (but not normal page content)
         title = await page.title()
         title_lower = title.lower()
-        if any(w in title_lower for w in ["access denied", "blocked", "captcha", "just a moment"]):
+        if any(w in title_lower for w in ["access denied", "zugriff verweigert", "blocked", "captcha", "just a moment"]):
             return True
         # Check for very short pages that are likely block pages
         if len(content) < 1000 and ("403" in content or "rate limit" in content_lower):

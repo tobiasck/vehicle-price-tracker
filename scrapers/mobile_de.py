@@ -1,13 +1,35 @@
+import asyncio
 import logging
 import re
 
 from scrapers.base_scraper import BaseScraper
-from utils.anti_detect import random_action_delay
+from utils.anti_detect import random_action_delay, random_page_delay
 
 logger = logging.getLogger(__name__)
 
 
 class MobileDeScraper(BaseScraper):
+
+    async def _navigate_with_warmup(self, page, target_url):
+        """Navigate to mobile.de via homepage first to establish a normal session."""
+        logger.info("Warming up session via mobile.de homepage")
+
+        # Visit homepage first
+        await page.goto("https://www.mobile.de", wait_until="domcontentloaded", timeout=30000)
+        await random_page_delay()
+
+        # Dismiss consent on homepage
+        await self.dismiss_consent(page)
+        await asyncio.sleep(2)
+
+        # Now navigate to the search
+        logger.info("Navigating to search URL")
+        await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(3)
+
+    async def navigate_to_search(self, page):
+        """Override: visit homepage first to warm up session, then search."""
+        await self._navigate_with_warmup(page, self.search_url)
 
     async def dismiss_consent(self, page):
         try:
