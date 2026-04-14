@@ -8,7 +8,7 @@ echo "=== Vehicle Scraper Setup ==="
 
 # 1. System packages — use python3 (works on Debian Trixie, Ubuntu 22+)
 apt update
-apt install -y python3 python3-venv python3-pip postgresql postgresql-client
+apt install -y python3 python3-venv python3-pip postgresql postgresql-client chromium
 
 # 2. Create scraper user
 if ! id -u scraper &>/dev/null; then

@@ -1,89 +1,216 @@
 import asyncio
 import logging
+import os
+import random
 import re
 
-from scrapers.base_scraper import BaseScraper
-from utils.anti_detect import random_action_delay, random_page_delay
+import nodriver
+
+from config.settings import (
+    MIN_PAGE_DELAY, MAX_PAGE_DELAY,
+    BLOCK_RETRY_WAIT_MIN, BLOCK_RETRY_WAIT_MAX, MAX_RETRIES,
+    USER_AGENTS,
+)
+from db.models import (
+    create_scrape_run, finish_scrape_run,
+    upsert_listing, insert_snapshot, update_run_statistics,
+)
 
 logger = logging.getLogger(__name__)
 
+DEBUG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug")
 
-class MobileDeScraper(BaseScraper):
 
-    async def _navigate_with_warmup(self, page, target_url):
-        """Navigate to mobile.de via homepage first to establish a normal session."""
-        logger.info("Warming up session via mobile.de homepage")
+class MobileDeScraper:
+    """mobile.de scraper using nodriver for better anti-detection."""
 
-        # Visit homepage first
-        await page.goto("https://www.mobile.de", wait_until="domcontentloaded", timeout=30000)
-        await random_page_delay()
+    def __init__(self, search_config, conn):
+        self.config = search_config
+        self.conn = conn
+        self.platform = search_config["platform"]
+        self.search_url = search_config["search_url"]
+        self.config_id = search_config["id"]
+        self.vehicle_name = search_config["vehicle_name"]
+        self.debug = False
 
-        # Dismiss consent on homepage
-        await self.dismiss_consent(page)
-        await asyncio.sleep(2)
+    async def run(self, dry_run=False, debug=False):
+        logger.info("Starting scrape: %s on %s (nodriver)", self.vehicle_name, self.platform)
+        self.debug = debug
 
-        # Now navigate to the search
-        logger.info("Navigating to search URL")
-        await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(3)
+        run_id = None
+        if not dry_run:
+            run_id = create_scrape_run(self.conn, self.config_id)
 
-    async def navigate_to_search(self, page):
-        """Override: visit homepage first to warm up session, then search."""
-        await self._navigate_with_warmup(page, self.search_url)
-
-    async def dismiss_consent(self, page):
+        total_listings = 0
+        browser = None
         try:
-            # mobile.de uses a CMP consent popup
-            for selector in [
-                "button:has-text('Einverstanden')",
-                "button:has-text('Alle akzeptieren')",
-                "button:has-text('Accept All')",
-                "#mde-consent-accept-btn",
-                "[data-testid='gdpr-consent-accept-all']",
-            ]:
-                btn = page.locator(selector)
-                if await btn.count() > 0:
-                    await random_action_delay()
-                    await btn.first.click()
-                    logger.info("Dismissed cookie consent via: %s", selector)
-                    await random_action_delay()
+            browser = await nodriver.start(
+                headless=True,
+                lang="de-DE",
+                browser_args=[
+                    f"--user-agent={random.choice(USER_AGENTS)}",
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+
+            # Warm up: visit homepage first
+            logger.info("Warming up session via mobile.de homepage")
+            page = await browser.get("https://www.mobile.de")
+            await asyncio.sleep(random.uniform(3, 5))
+
+            # Dismiss cookie consent
+            await self._dismiss_consent(page)
+            await asyncio.sleep(random.uniform(2, 4))
+
+            # Navigate to search
+            logger.info("Navigating to search URL")
+            page = await browser.get(self.search_url)
+            await asyncio.sleep(random.uniform(3, 5))
+
+            # Check if blocked
+            if await self._is_blocked(page):
+                if self.debug:
+                    await self._save_debug(page, "blocked_after_warmup")
+
+                # Retry once with longer wait
+                wait = random.uniform(BLOCK_RETRY_WAIT_MIN, BLOCK_RETRY_WAIT_MAX)
+                logger.warning("Blocked after warmup, waiting %.0fs", wait)
+                await asyncio.sleep(wait)
+
+                page = await browser.get(self.search_url)
+                await asyncio.sleep(random.uniform(3, 5))
+
+                if await self._is_blocked(page):
+                    if self.debug:
+                        await self._save_debug(page, "blocked_final")
+                    raise RuntimeError("Blocked by mobile.de after retry")
+
+            # Dismiss consent again if it appeared on search page
+            await self._dismiss_consent(page)
+
+            page_num = 1
+            while True:
+                logger.info("Parsing page %d", page_num)
+                await self._human_scroll(page)
+
+                if self.debug:
+                    await self._save_debug(page, f"page_{page_num}")
+
+                listings = await self._parse_listing_cards(page)
+                logger.info("Found %d listings on page %d", len(listings), page_num)
+
+                for listing_data in listings:
+                    if dry_run:
+                        logger.info("[DRY RUN] %s", listing_data)
+                    else:
+                        self._save_listing(run_id, listing_data)
+
+                total_listings += len(listings)
+
+                has_next = await self._get_next_page(page, browser, page_num)
+                if not has_next:
+                    break
+
+                page = browser.main_tab
+                await asyncio.sleep(random.uniform(MIN_PAGE_DELAY, MAX_PAGE_DELAY))
+                page_num += 1
+
+            if not dry_run:
+                finish_scrape_run(self.conn, run_id, "success", total_listings)
+                update_run_statistics(self.conn, run_id)
+
+            logger.info("Scrape complete: %s — %d listings total", self.vehicle_name, total_listings)
+
+        except Exception as e:
+            logger.error("Scrape failed for %s: %s", self.vehicle_name, e, exc_info=True)
+            if not dry_run and run_id:
+                finish_scrape_run(self.conn, run_id, "failed", total_listings, str(e))
+            raise
+
+        finally:
+            if browser:
+                browser.stop()
+
+        return total_listings
+
+    async def _dismiss_consent(self, page):
+        try:
+            # Try to find and click cookie consent buttons
+            for text in ["Einverstanden", "Alle akzeptieren", "Accept All"]:
+                btn = await page.find(text, best_match=True, timeout=3)
+                if btn:
+                    await asyncio.sleep(random.uniform(0.5, 1.5))
+                    await btn.click()
+                    logger.info("Dismissed cookie consent: '%s'", text)
+                    await asyncio.sleep(1)
                     return
         except Exception as e:
             logger.debug("No consent banner or failed to dismiss: %s", e)
 
-    async def parse_listing_cards(self, page) -> list[dict]:
+    async def _is_blocked(self, page):
+        content = await page.get_content()
+        content_lower = content.lower()
+
+        if "zugriff verweigert" in content_lower or "access denied" in content_lower:
+            return True
+        if "cf-challenge" in content_lower or "cf-turnstile" in content_lower:
+            return True
+
+        # Check page title
+        try:
+            title_el = await page.query_selector("title")
+            if title_el:
+                title = await title_el.get_js_attribute("textContent") or ""
+                if any(w in title.lower() for w in ["zugriff verweigert", "access denied", "captcha", "just a moment"]):
+                    return True
+        except Exception:
+            pass
+
+        return False
+
+    async def _human_scroll(self, page):
+        for _ in range(random.randint(2, 4)):
+            scroll_amount = random.randint(200, 500)
+            await page.evaluate(f"window.scrollBy(0, {scroll_amount})")
+            await asyncio.sleep(random.uniform(0.3, 0.8))
+
+    async def _save_debug(self, page, label):
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        prefix = f"{self.platform}_{label}"
+        try:
+            await page.save_screenshot(os.path.join(DEBUG_DIR, f"{prefix}.png"))
+            content = await page.get_content()
+            with open(os.path.join(DEBUG_DIR, f"{prefix}.html"), "w") as f:
+                f.write(content)
+            logger.info("Debug saved: %s", prefix)
+        except Exception as e:
+            logger.warning("Failed to save debug for %s: %s", prefix, e)
+
+    async def _parse_listing_cards(self, page) -> list[dict]:
         listings = []
 
-        # mobile.de listing cards — try multiple selector strategies
-        selectors = [
+        # Try multiple selectors for listing cards
+        elements = []
+        for selector in [
             "a.link--muted.no--text--decoration",
             "[data-testid='result-listing']",
             "div.cBox-body--resultitem",
             "article[data-listing-id]",
-        ]
-
-        elements = None
-        for selector in selectors:
-            candidate = page.locator(selector)
-            count = await candidate.count()
-            if count > 0:
-                elements = candidate
-                logger.debug("Using selector '%s' — found %d items", selector, count)
-                break
-
-        if elements is None:
-            # Last resort: find all links that look like listing URLs
-            elements = page.locator("a[href*='/fahrzeuge/details/']")
-            count = await elements.count()
-            logger.debug("Fallback link selector found %d items", count)
-
-        count = await elements.count()
-        for i in range(count):
+            "a[href*='/fahrzeuge/details/']",
+        ]:
             try:
-                element = elements.nth(i)
-                listing = await self._parse_single_card(element, page)
+                found = await page.query_selector_all(selector)
+                if found:
+                    elements = found
+                    logger.debug("Using selector '%s' — found %d items", selector, len(found))
+                    break
+            except Exception:
+                continue
+
+        for i, element in enumerate(elements):
+            try:
+                listing = await self._parse_single_card(element)
                 if listing and listing.get("platform_id"):
-                    # Deduplicate by platform_id within a page
                     if not any(l["platform_id"] == listing["platform_id"] for l in listings):
                         listings.append(listing)
             except Exception as e:
@@ -92,23 +219,19 @@ class MobileDeScraper(BaseScraper):
 
         return listings
 
-    async def _parse_single_card(self, element, page) -> dict | None:
+    async def _parse_single_card(self, element) -> dict | None:
         data = {}
 
-        # Extract listing URL and platform ID
-        tag = await element.evaluate("el => el.tagName.toLowerCase()")
-        if tag == "a":
-            href = await element.get_attribute("href")
-        else:
-            link = element.locator("a[href*='/fahrzeuge/details/']")
-            if await link.count() > 0:
-                href = await link.first.get_attribute("href")
-            else:
-                href = None
+        # Extract href
+        href = await element.get_js_attribute("href")
+        if not href:
+            # Try to find a link inside
+            link = await element.query_selector("a[href*='/fahrzeuge/details/']")
+            if link:
+                href = await link.get_js_attribute("href")
 
         if href:
-            data["listing_url"] = self._build_full_url(href)
-            # Extract ID from URL like /fahrzeuge/details/123456789
+            data["listing_url"] = href if href.startswith("http") else f"https://suchen.mobile.de{href}"
             match = re.search(r"/details/(\d+)", href)
             if match:
                 data["platform_id"] = match.group(1)
@@ -117,11 +240,11 @@ class MobileDeScraper(BaseScraper):
                 if match:
                     data["platform_id"] = match.group(1)
 
-        # Try data-listing-id attribute
+        # Try data-listing-id
         if "platform_id" not in data:
-            lid = await element.get_attribute("data-listing-id")
+            lid = await element.get_js_attribute("data-listing-id")
             if lid:
-                data["platform_id"] = lid
+                data["platform_id"] = str(lid)
 
         if "platform_id" not in data:
             return None
@@ -129,8 +252,8 @@ class MobileDeScraper(BaseScraper):
         if "listing_url" not in data:
             data["listing_url"] = ""
 
-        # Get text content for extraction
-        text = await element.text_content() or ""
+        # Get text content
+        text = await element.get_js_attribute("textContent") or ""
 
         data["title"] = self._extract_title(text)
         data["price_cents"] = self._extract_price(text)
@@ -141,16 +264,15 @@ class MobileDeScraper(BaseScraper):
 
         return data
 
-    def _build_full_url(self, href):
-        if href.startswith("http"):
-            return href
-        return f"https://suchen.mobile.de{href}"
+    def _save_listing(self, run_id, data):
+        listing_id = upsert_listing(
+            self.conn, self.config_id, data["platform_id"], data["listing_url"],
+        )
+        insert_snapshot(self.conn, listing_id, run_id, data)
 
     def _extract_title(self, text):
         lines = [line.strip() for line in text.split("\n") if line.strip()]
-        if lines:
-            return lines[0][:200]
-        return None
+        return lines[0][:200] if lines else None
 
     def _extract_price(self, text):
         patterns = [
@@ -210,29 +332,12 @@ class MobileDeScraper(BaseScraper):
             return "private"
         return None
 
-    async def get_next_page(self, page) -> bool:
+    async def _get_next_page(self, page, browser, current_page_num) -> bool:
         try:
-            # mobile.de uses pageNumber parameter
             current_url = page.url
             match = re.search(r"pageNumber=(\d+)", current_url)
             current_page = int(match.group(1)) if match else 1
 
-            # Check for "next" button
-            next_selectors = [
-                "a[data-testid='pagination-next']",
-                "span.btn.btn--muted.btn--s:has-text('»')",
-                "a:has-text('Nächste')",
-                "a:has-text('»')",
-            ]
-            for selector in next_selectors:
-                btn = page.locator(selector)
-                if await btn.count() > 0:
-                    await random_action_delay()
-                    await btn.first.click()
-                    await page.wait_for_load_state("domcontentloaded")
-                    return True
-
-            # Fallback: manually set pageNumber
             next_page = current_page + 1
             if "pageNumber=" in current_url:
                 next_url = re.sub(r"pageNumber=\d+", f"pageNumber={next_page}", current_url)
@@ -240,12 +345,17 @@ class MobileDeScraper(BaseScraper):
                 separator = "&" if "?" in current_url else "?"
                 next_url = f"{current_url}{separator}pageNumber={next_page}"
 
-            await page.goto(next_url, wait_until="domcontentloaded")
+            page = await browser.get(next_url)
+            await asyncio.sleep(random.uniform(2, 4))
 
-            # Verify we got results
+            # Check if we got results
             for selector in ["a.link--muted", "[data-testid='result-listing']", "a[href*='/fahrzeuge/details/']"]:
-                if await page.locator(selector).count() > 0:
-                    return True
+                try:
+                    found = await page.query_selector_all(selector)
+                    if found:
+                        return True
+                except Exception:
+                    continue
 
             return False
 
