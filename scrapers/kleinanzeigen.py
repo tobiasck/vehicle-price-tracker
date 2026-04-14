@@ -114,15 +114,19 @@ class KleinanzeigenScraper(BaseScraper):
     def _extract_price(self, text):
         # Kleinanzeigen patterns: "12.500 €", "VB 12.500 €", "12.500 € VB"
         patterns = [
-            r"(\d{1,3}(?:\.\d{3})*)\s*€",
-            r"€\s*(\d{1,3}(?:\.\d{3})*)",
+            r"(\d{1,3}(?:\.\d{3})+)\s*€",
+            r"€\s*(\d{1,3}(?:\.\d{3})+)",
+            r"(\d{3,6})\s*€",
+            r"€\s*(\d{3,6})",
         ]
         for pattern in patterns:
             match = re.search(pattern, text)
             if match:
                 price_str = match.group(1).replace(".", "")
                 try:
-                    return int(price_str) * 100
+                    price = int(price_str)
+                    if price >= 100:
+                        return price * 100
                 except ValueError:
                     continue
         return None

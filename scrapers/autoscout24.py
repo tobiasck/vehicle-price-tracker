@@ -113,21 +113,28 @@ class AutoScout24Scraper(BaseScraper):
         return None
 
     def _extract_price(self, text):
-        # Patterns: "12.500 €", "€ 12.500", "EUR 12.500", "12,500 €"
+        # Patterns: "12.500 €", "€ 12.500", "EUR 12.500"
+        # Use findall to get ALL price matches, then pick the most realistic one
         patterns = [
-            r"(\d{1,3}(?:\.\d{3})*)\s*€",
-            r"€\s*(\d{1,3}(?:\.\d{3})*)",
-            r"EUR\s*(\d{1,3}(?:\.\d{3})*)",
-            r"(\d{1,3}(?:,\d{3})*)\s*€",
+            r"(\d{1,3}(?:\.\d{3})+)\s*€",       # 1.000+ with dots (e.g. "12.500 €")
+            r"€\s*(\d{1,3}(?:\.\d{3})+)",        # € prefix with dots
+            r"EUR\s*(\d{1,3}(?:\.\d{3})+)",       # EUR prefix with dots
+            r"(\d{3,6})\s*€",                     # Plain number 100-999999 €
+            r"€\s*(\d{3,6})",                     # € prefix plain number
         ]
+        candidates = []
         for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
+            for match in re.finditer(pattern, text):
                 price_str = match.group(1).replace(".", "").replace(",", "")
                 try:
-                    return int(price_str) * 100  # Convert to cents
+                    price = int(price_str)
+                    if price >= 100:  # Ignore UI artifacts like "4€"
+                        candidates.append(price)
                 except ValueError:
                     continue
+        if candidates:
+            # Return the first realistic price (typically the listing price)
+            return candidates[0] * 100  # Convert to cents
         return None
 
     def _extract_mileage(self, text):
