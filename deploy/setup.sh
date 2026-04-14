@@ -1,14 +1,14 @@
 #!/bin/bash
-# Deployment script for Ubuntu VM
+# Deployment script for Ubuntu/Debian VM
 # Run as root: sudo bash deploy/setup.sh
 
 set -e
 
 echo "=== Vehicle Scraper Setup ==="
 
-# 1. System packages
+# 1. System packages — use python3 (works on Debian Trixie, Ubuntu 22+)
 apt update
-apt install -y python3.11 python3.11-venv postgresql postgresql-client
+apt install -y python3 python3-venv python3-pip postgresql postgresql-client
 
 # 2. Create scraper user
 if ! id -u scraper &>/dev/null; then
@@ -30,7 +30,7 @@ chown -R scraper:scraper /opt/mobile-scraper
 # 5. Python venv
 sudo -u scraper bash -c "
     cd /opt/mobile-scraper
-    python3.11 -m venv venv
+    python3 -m venv venv
     source venv/bin/activate
     pip install -r requirements.txt
     patchright install chromium
