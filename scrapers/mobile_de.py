@@ -53,32 +53,58 @@ class MobileDeScraper:
                 ],
             )
 
-            # Warm up: visit homepage first
-            logger.info("Warming up session via mobile.de homepage")
+            # Step 1: Visit homepage and establish session
+            logger.info("Step 1: Visiting mobile.de homepage")
             page = await browser.get("https://www.mobile.de")
-            await asyncio.sleep(random.uniform(3, 5))
+            await asyncio.sleep(random.uniform(4, 7))
 
-            # Dismiss cookie consent
+            if await self._is_blocked(page):
+                if self.debug:
+                    await self._save_debug(page, "blocked_homepage")
+                raise RuntimeError("Blocked by mobile.de on homepage — IP may be banned")
+
+            # Step 2: Dismiss cookie consent
             await self._dismiss_consent(page)
             await asyncio.sleep(random.uniform(2, 4))
 
-            # Navigate to search
-            logger.info("Navigating to search URL")
+            # Step 3: Browse organically — click on "Suche" or similar nav element
+            logger.info("Step 2: Navigating organically to search")
+            await self._human_scroll(page)
+            await asyncio.sleep(random.uniform(2, 3))
+
+            # Try clicking the search link from homepage
+            search_clicked = False
+            for text in ["Suche", "Fahrzeuge suchen", "Detailsuche", "Erweiterte Suche"]:
+                try:
+                    link = await page.find(text, best_match=True, timeout=3)
+                    if link:
+                        await asyncio.sleep(random.uniform(1, 2))
+                        await link.click()
+                        await asyncio.sleep(random.uniform(3, 5))
+                        search_clicked = True
+                        logger.info("Clicked navigation link: '%s'", text)
+                        break
+                except Exception:
+                    continue
+
+            # Step 4: Navigate to actual search URL (after organic warmup)
+            logger.info("Step 3: Loading search results")
+            await asyncio.sleep(random.uniform(2, 4))
             page = await browser.get(self.search_url)
-            await asyncio.sleep(random.uniform(3, 5))
+            await asyncio.sleep(random.uniform(4, 7))
 
             # Check if blocked
             if await self._is_blocked(page):
                 if self.debug:
                     await self._save_debug(page, "blocked_after_warmup")
 
-                # Retry once with longer wait
-                wait = random.uniform(BLOCK_RETRY_WAIT_MIN, BLOCK_RETRY_WAIT_MAX)
-                logger.warning("Blocked after warmup, waiting %.0fs", wait)
+                # Wait longer and retry
+                wait = random.uniform(60, 120)
+                logger.warning("Blocked after warmup, waiting %.0fs before retry", wait)
                 await asyncio.sleep(wait)
 
                 page = await browser.get(self.search_url)
-                await asyncio.sleep(random.uniform(3, 5))
+                await asyncio.sleep(random.uniform(4, 7))
 
                 if await self._is_blocked(page):
                     if self.debug:
