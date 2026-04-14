@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import random
 from abc import ABC, abstractmethod
 
@@ -16,6 +17,8 @@ from utils.anti_detect import (
 
 logger = logging.getLogger(__name__)
 
+DEBUG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "debug")
+
 
 class BaseScraper(ABC):
     def __init__(self, search_config, conn):
@@ -26,8 +29,9 @@ class BaseScraper(ABC):
         self.config_id = search_config["id"]
         self.vehicle_name = search_config["vehicle_name"]
 
-    async def run(self, dry_run=False):
+    async def run(self, dry_run=False, debug=False):
         logger.info("Starting scrape: %s on %s", self.vehicle_name, self.platform)
+        self.debug = debug
 
         run_id = None
         if not dry_run:
@@ -48,6 +52,9 @@ class BaseScraper(ABC):
                 while True:
                     logger.info("Parsing page %d", page_num)
                     await human_scroll(page)
+
+                    if self.debug:
+                        await self._save_debug(page, f"page_{page_num}")
 
                     listings = await self.parse_listing_cards(page)
                     logger.info("Found %d listings on page %d", len(listings), page_num)
@@ -94,6 +101,7 @@ class BaseScraper(ABC):
             await asyncio.sleep(2)
 
             if await self._is_blocked(page):
+                await self._save_debug(page, f"blocked_attempt_{attempt + 1}")
                 if attempt < MAX_RETRIES:
                     wait = random.uniform(BLOCK_RETRY_WAIT_MIN, BLOCK_RETRY_WAIT_MAX)
                     logger.warning("Blocked on attempt %d, waiting %.0fs", attempt + 1, wait)
@@ -103,17 +111,33 @@ class BaseScraper(ABC):
             else:
                 return
 
+    async def _save_debug(self, page, label):
+        os.makedirs(DEBUG_DIR, exist_ok=True)
+        prefix = f"{self.platform}_{label}"
+        try:
+            await page.screenshot(path=os.path.join(DEBUG_DIR, f"{prefix}.png"), full_page=True)
+            html = await page.content()
+            with open(os.path.join(DEBUG_DIR, f"{prefix}.html"), "w") as f:
+                f.write(html)
+            logger.info("Debug saved: %s", prefix)
+        except Exception as e:
+            logger.warning("Failed to save debug for %s: %s", prefix, e)
+
     async def _is_blocked(self, page):
         content = await page.content()
-        block_indicators = [
-            "cf-challenge",
-            "captcha",
-            "access denied",
-            "blocked",
-            "rate limit",
-        ]
         content_lower = content.lower()
-        return any(indicator in content_lower for indicator in block_indicators)
+        # Check for Cloudflare challenge specifically
+        if "cf-challenge" in content_lower or "cf-turnstile" in content_lower:
+            return True
+        # Check for explicit block pages (but not normal page content)
+        title = await page.title()
+        title_lower = title.lower()
+        if any(w in title_lower for w in ["access denied", "blocked", "captcha", "just a moment"]):
+            return True
+        # Check for very short pages that are likely block pages
+        if len(content) < 1000 and ("403" in content or "rate limit" in content_lower):
+            return True
+        return False
 
     def _save_listing(self, run_id, data):
         listing_id = upsert_listing(

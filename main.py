@@ -20,7 +20,7 @@ SCRAPER_MAP = {
 }
 
 
-async def run_scraper(search_config, conn, dry_run=False):
+async def run_scraper(search_config, conn, dry_run=False, debug=False):
     platform = search_config["platform"]
     scraper_cls = SCRAPER_MAP.get(platform)
 
@@ -30,7 +30,7 @@ async def run_scraper(search_config, conn, dry_run=False):
 
     scraper = scraper_cls(search_config, conn)
     try:
-        count = await scraper.run(dry_run=dry_run)
+        count = await scraper.run(dry_run=dry_run, debug=debug)
         logger.info(
             "Finished %s/%s: %d listings",
             search_config["vehicle_name"], platform, count,
@@ -48,10 +48,11 @@ async def main():
     parser = argparse.ArgumentParser(description="Vehicle Market Price Scraper")
     parser.add_argument("--dry-run", action="store_true", help="Parse and log but don't write to DB")
     parser.add_argument("--target", type=str, help="Only run scraper for this platform (mobile_de, autoscout24, kleinanzeigen)")
+    parser.add_argument("--debug", action="store_true", help="Save screenshots and HTML for debugging")
     args = parser.parse_args()
 
     setup_logging()
-    logger.info("Starting vehicle scraper (dry_run=%s, target=%s)", args.dry_run, args.target)
+    logger.info("Starting vehicle scraper (dry_run=%s, target=%s, debug=%s)", args.dry_run, args.target, args.debug)
 
     conn = get_connection()
     try:
@@ -68,7 +69,7 @@ async def main():
         successes = 0
         for config in configs:
             logger.info("--- Running: %s on %s ---", config["vehicle_name"], config["platform"])
-            ok = await run_scraper(config, conn, dry_run=args.dry_run)
+            ok = await run_scraper(config, conn, dry_run=args.dry_run, debug=args.debug)
             if ok:
                 successes += 1
 
