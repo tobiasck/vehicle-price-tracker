@@ -1,17 +1,11 @@
 #!/usr/bin/env python3
-"""Generate price trend charts and HTML report from scraped data."""
+"""Generate interactive price report with Plotly charts."""
 
 import argparse
-import base64
-import io
+import json
 import logging
 import os
 from datetime import datetime
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
 from config.logging_config import setup_logging
 from db.connection import get_connection
@@ -21,8 +15,23 @@ logger = logging.getLogger(__name__)
 REPORT_DIR = os.path.join(os.path.dirname(__file__), "report")
 
 
+def get_vehicles(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT v.id, v.name, v.description,
+                   COUNT(DISTINCT sc.id) AS config_count,
+                   COALESCE(SUM(sr.listings_found), 0) AS total_listings
+            FROM vehicles v
+            LEFT JOIN search_configs sc ON sc.vehicle_id = v.id AND sc.active = TRUE
+            LEFT JOIN scrape_runs sr ON sr.search_config_id = sc.id AND sr.status = 'success'
+            GROUP BY v.id, v.name, v.description
+            ORDER BY v.name
+        """)
+        columns = [desc[0] for desc in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
 def get_vehicle_stats(conn):
-    """Get aggregated price stats per scrape run for each vehicle."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT
@@ -44,28 +53,7 @@ def get_vehicle_stats(conn):
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
-def get_listing_prices(conn, vehicle_name):
-    """Get individual listing prices over time for a vehicle."""
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT
-                ls.scraped_at,
-                ls.price_cents,
-                ls.title,
-                l.platform_id
-            FROM listing_snapshots ls
-            JOIN listings l ON l.id = ls.listing_id
-            JOIN search_configs sc ON sc.id = l.search_config_id
-            JOIN vehicles v ON v.id = sc.vehicle_id
-            WHERE v.name = %s AND ls.price_cents IS NOT NULL
-            ORDER BY ls.scraped_at
-        """, (vehicle_name,))
-        columns = [desc[0] for desc in cur.description]
-        return [dict(zip(columns, row)) for row in cur.fetchall()]
-
-
 def get_current_listings(conn, vehicle_name):
-    """Get the most recent snapshot for each active listing."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT ON (l.platform_id)
@@ -88,175 +76,353 @@ def get_current_listings(conn, vehicle_name):
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
-def cents_to_eur(cents):
-    return cents / 100 if cents else 0
+def serialize_stats(stats):
+    """Convert stats to JSON-serializable format."""
+    result = {}
+    for s in stats:
+        name = s["vehicle_name"]
+        if name not in result:
+            result[name] = []
+        result[name].append({
+            "date": s["started_at"].isoformat(),
+            "median": s["median_price"] / 100 if s["median_price"] else None,
+            "avg": s["avg_price"] / 100 if s["avg_price"] else None,
+            "min": s["min_price"] / 100 if s["min_price"] else None,
+            "max": s["max_price"] / 100 if s["max_price"] else None,
+            "count": s["listings_found"],
+            "platform": s["platform"],
+        })
+    return result
 
 
-def create_price_trend_chart(stats, vehicle_name):
-    """Create a price trend chart (median, avg, min, max over time)."""
-    vehicle_stats = [s for s in stats if s["vehicle_name"] == vehicle_name]
-    if not vehicle_stats:
-        return None
-
-    dates = [s["started_at"] for s in vehicle_stats]
-    median_prices = [cents_to_eur(s["median_price"]) for s in vehicle_stats]
-    avg_prices = [cents_to_eur(s["avg_price"]) for s in vehicle_stats]
-    min_prices = [cents_to_eur(s["min_price"]) for s in vehicle_stats]
-    max_prices = [cents_to_eur(s["max_price"]) for s in vehicle_stats]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-
-    ax.fill_between(dates, min_prices, max_prices, alpha=0.15, color="#2196F3", label="Min–Max")
-    ax.plot(dates, median_prices, "o-", color="#1565C0", linewidth=2, markersize=6, label="Median")
-    ax.plot(dates, avg_prices, "s--", color="#FF9800", linewidth=1.5, markersize=5, label="Durchschnitt")
-
-    ax.set_title(f"Preisentwicklung: {vehicle_name}", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Datum")
-    ax.set_ylabel("Preis (€)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m.%Y"))
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    fig.autofmt_xdate()
-
-    # Format y-axis with € and thousands separator
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:,.0f} €".replace(",", ".")))
-
-    plt.tight_layout()
-    return fig_to_base64(fig)
+def serialize_listings(conn, vehicles):
+    """Convert all listings to JSON-serializable format."""
+    result = {}
+    for v in vehicles:
+        listings = get_current_listings(conn, v["name"])
+        result[v["name"]] = [{
+            "price": l["price_cents"] / 100 if l["price_cents"] else 0,
+            "km": l["mileage_km"],
+            "year": l["year"],
+            "location": l["location"],
+            "seller": l["seller_type"],
+            "title": (l["title"] or "")[:100],
+            "url": l["listing_url"] or "",
+            "scraped": l["scraped_at"].isoformat() if l["scraped_at"] else "",
+        } for l in listings]
+    return result
 
 
-def create_price_distribution_chart(conn, vehicle_name):
-    """Create a histogram of current listing prices."""
-    listings = get_current_listings(conn, vehicle_name)
-    if not listings:
-        return None
-
-    prices = [cents_to_eur(l["price_cents"]) for l in listings]
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.hist(prices, bins=min(20, len(prices)), color="#2196F3", edgecolor="white", alpha=0.8)
-    ax.axvline(sorted(prices)[len(prices) // 2], color="#F44336", linestyle="--", linewidth=2,
-               label=f"Median: {sorted(prices)[len(prices) // 2]:,.0f} €".replace(",", "."))
-    ax.set_title(f"Preisverteilung: {vehicle_name} (n={len(prices)})", fontsize=14, fontweight="bold")
-    ax.set_xlabel("Preis (€)")
-    ax.set_ylabel("Anzahl Inserate")
-    ax.legend()
-    ax.grid(True, alpha=0.3, axis="y")
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f"{x:,.0f} €".replace(",", ".")))
-    plt.tight_layout()
-    return fig_to_base64(fig)
-
-
-def fig_to_base64(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("utf-8")
-
-
-def build_listings_table(conn, vehicle_name):
-    """Build HTML table of current listings."""
-    listings = get_current_listings(conn, vehicle_name)
-    if not listings:
-        return "<p>Keine Inserate gefunden.</p>"
-
-    # Sort by price
-    listings.sort(key=lambda l: l["price_cents"] or 0)
-
-    rows = []
-    for l in listings:
-        price = f'{cents_to_eur(l["price_cents"]):,.0f} €'.replace(",", ".")
-        km = f'{l["mileage_km"]:,} km'.replace(",", ".") if l["mileage_km"] else "–"
-        year = l["year"] or "–"
-        location = l["location"] or "–"
-        seller = l["seller_type"] or "–"
-        title = (l["title"] or "–")[:80]
-        url = l["listing_url"] or "#"
-        rows.append(
-            f"<tr><td>{price}</td><td>{year}</td><td>{km}</td>"
-            f"<td>{location}</td><td>{seller}</td>"
-            f'<td><a href="{url}" target="_blank">{title}</a></td></tr>'
-        )
-
-    return f"""
-    <table>
-        <thead><tr>
-            <th>Preis</th><th>Baujahr</th><th>km</th>
-            <th>Ort</th><th>Verkäufer</th><th>Inserat</th>
-        </tr></thead>
-        <tbody>{"".join(rows)}</tbody>
-    </table>
-    """
-
-
-def generate_html_report(conn, stats):
-    """Generate complete HTML report."""
-    # Get unique vehicle names
-    vehicles = list(dict.fromkeys(s["vehicle_name"] for s in stats))
-
-    # If no stats yet, get vehicles from DB
-    if not vehicles:
-        with conn.cursor() as cur:
-            cur.execute("SELECT name FROM vehicles ORDER BY name")
-            vehicles = [row[0] for row in cur.fetchall()]
-
-    sections = []
-    for vehicle in vehicles:
-        trend_chart = create_price_trend_chart(stats, vehicle)
-        dist_chart = create_price_distribution_chart(conn, vehicle)
-        table = build_listings_table(conn, vehicle)
-
-        section = f'<div class="vehicle-section"><h2>{vehicle}</h2>'
-
-        if trend_chart:
-            section += f'<h3>Preisentwicklung</h3><img src="data:image/png;base64,{trend_chart}" alt="Preistrend">'
-        else:
-            section += "<p><em>Noch keine historischen Daten für Trendanalyse.</em></p>"
-
-        if dist_chart:
-            section += f'<h3>Preisverteilung (aktuell)</h3><img src="data:image/png;base64,{dist_chart}" alt="Preisverteilung">'
-
-        section += f"<h3>Aktuelle Inserate</h3>{table}</div>"
-        sections.append(section)
-
+def generate_html(conn, stats, vehicles):
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    stats_json = json.dumps(serialize_stats(stats))
+    listings_json = json.dumps(serialize_listings(conn, vehicles))
+    vehicles_json = json.dumps([{"name": v["name"], "description": v["description"],
+                                  "total_listings": int(v["total_listings"])} for v in vehicles])
 
-    html = f"""<!DOCTYPE html>
+    return f"""<!DOCTYPE html>
 <html lang="de">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="3600">
-    <title>Fahrzeug-Preistracker</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-               background: #f5f5f5; color: #333; padding: 20px; max-width: 1100px; margin: 0 auto; }}
-        h1 {{ margin-bottom: 5px; color: #1a1a1a; }}
-        .subtitle {{ color: #666; margin-bottom: 30px; font-size: 0.9em; }}
-        .vehicle-section {{ background: #fff; border-radius: 8px; padding: 25px;
-                           margin-bottom: 25px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-        h2 {{ color: #1565C0; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid #e0e0e0; }}
-        h3 {{ color: #555; margin: 20px 0 10px; font-size: 1em; }}
-        img {{ max-width: 100%; height: auto; border-radius: 4px; }}
-        table {{ width: 100%; border-collapse: collapse; font-size: 0.85em; margin-top: 10px; }}
-        th {{ background: #f0f0f0; padding: 8px 10px; text-align: left; font-weight: 600;
-             border-bottom: 2px solid #ddd; }}
-        td {{ padding: 7px 10px; border-bottom: 1px solid #eee; }}
-        tr:hover {{ background: #f8f8f8; }}
-        a {{ color: #1565C0; text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fahrzeug-Preistracker</title>
+<script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+<style>
+:root {{
+    --bg: #1a1a2e; --bg2: #16213e; --card: #1e2a4a; --border: #2a3a5e;
+    --text: #e0e0e0; --text2: #8892a8; --accent: #4fc3f7; --accent2: #ff9800;
+    --danger: #ef5350; --success: #66bb6a;
+}}
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+       background:var(--bg); color:var(--text); }}
+
+/* Landing page */
+.landing {{ min-height:100vh; display:flex; flex-direction:column; align-items:center;
+           justify-content:center; padding:40px 20px; }}
+.landing h1 {{ font-size:2.2em; margin-bottom:8px; color:var(--accent); }}
+.landing .subtitle {{ color:var(--text2); margin-bottom:40px; }}
+.vehicle-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
+                gap:20px; max-width:800px; width:100%; }}
+.vehicle-card {{ background:var(--card); border:1px solid var(--border); border-radius:12px;
+                padding:28px; cursor:pointer; transition:all 0.2s; }}
+.vehicle-card:hover {{ border-color:var(--accent); transform:translateY(-3px);
+                      box-shadow:0 8px 25px rgba(79,195,247,0.15); }}
+.vehicle-card h2 {{ font-size:1.3em; margin-bottom:8px; color:#fff; }}
+.vehicle-card p {{ color:var(--text2); font-size:0.9em; }}
+.vehicle-card .stat {{ display:inline-block; background:var(--bg2); padding:4px 10px;
+                      border-radius:6px; font-size:0.8em; margin-top:12px; color:var(--accent); }}
+
+/* Detail page */
+.detail {{ display:none; max-width:1100px; margin:0 auto; padding:20px; }}
+.detail.active {{ display:block; }}
+.back-btn {{ background:none; border:1px solid var(--border); color:var(--accent);
+            padding:8px 16px; border-radius:6px; cursor:pointer; font-size:0.9em;
+            margin-bottom:20px; transition:all 0.2s; }}
+.back-btn:hover {{ background:var(--card); border-color:var(--accent); }}
+.detail h1 {{ font-size:1.6em; margin-bottom:5px; color:#fff; }}
+.detail .meta {{ color:var(--text2); margin-bottom:25px; font-size:0.9em; }}
+
+.chart-card {{ background:var(--card); border-radius:10px; padding:20px;
+              margin-bottom:20px; border:1px solid var(--border); }}
+.chart-card h3 {{ color:var(--text2); font-size:0.95em; margin-bottom:12px; font-weight:500; }}
+
+/* Table section */
+.table-section {{ background:var(--card); border-radius:10px; padding:20px;
+                 border:1px solid var(--border); }}
+.table-section h3 {{ color:var(--text2); font-size:0.95em; margin-bottom:12px; font-weight:500; }}
+
+.filters {{ display:flex; gap:10px; margin-bottom:12px; flex-wrap:wrap; }}
+.filters input, .filters select {{
+    background:var(--bg2); border:1px solid var(--border); color:var(--text);
+    padding:7px 12px; border-radius:6px; font-size:0.85em; outline:none; }}
+.filters input:focus, .filters select:focus {{ border-color:var(--accent); }}
+.filters input::placeholder {{ color:var(--text2); }}
+
+.table-wrap {{ max-height:400px; overflow-y:auto; border-radius:6px; }}
+.table-wrap::-webkit-scrollbar {{ width:6px; }}
+.table-wrap::-webkit-scrollbar-track {{ background:var(--bg2); border-radius:3px; }}
+.table-wrap::-webkit-scrollbar-thumb {{ background:var(--border); border-radius:3px; }}
+.table-wrap::-webkit-scrollbar-thumb:hover {{ background:var(--accent); }}
+
+table {{ width:100%; border-collapse:collapse; font-size:0.85em; }}
+thead {{ position:sticky; top:0; z-index:1; }}
+th {{ background:var(--bg2); padding:10px 12px; text-align:left; font-weight:600;
+     color:var(--text2); border-bottom:2px solid var(--border); cursor:pointer;
+     user-select:none; white-space:nowrap; }}
+th:hover {{ color:var(--accent); }}
+th .sort-icon {{ margin-left:4px; font-size:0.7em; }}
+td {{ padding:8px 12px; border-bottom:1px solid var(--border); white-space:nowrap; }}
+tr:hover {{ background:rgba(79,195,247,0.05); }}
+a {{ color:var(--accent); text-decoration:none; }}
+a:hover {{ text-decoration:underline; }}
+.no-data {{ text-align:center; padding:40px; color:var(--text2); }}
+</style>
 </head>
 <body>
+
+<!-- Landing Page -->
+<div class="landing" id="landing">
     <h1>Fahrzeug-Preistracker</h1>
     <p class="subtitle">Letzte Aktualisierung: {now}</p>
-    {"".join(sections)}
+    <div class="vehicle-grid" id="vehicleGrid"></div>
+</div>
+
+<!-- Detail Pages (one per vehicle, generated by JS) -->
+<div id="detailContainer"></div>
+
+<script>
+const STATS = {stats_json};
+const LISTINGS = {listings_json};
+const VEHICLES = {vehicles_json};
+
+const fmt = n => n != null ? n.toLocaleString('de-DE', {{maximumFractionDigits:0}}) + ' \\u20ac' : '\\u2013';
+const fmtKm = n => n != null ? n.toLocaleString('de-DE') + ' km' : '\\u2013';
+
+// Build landing page
+const grid = document.getElementById('vehicleGrid');
+VEHICLES.forEach(v => {{
+    const listings = LISTINGS[v.name] || [];
+    const stats = STATS[v.name] || [];
+    const lastStat = stats[stats.length - 1];
+    const medianStr = lastStat ? fmt(lastStat.median) : 'Keine Daten';
+
+    const card = document.createElement('div');
+    card.className = 'vehicle-card';
+    card.innerHTML = `
+        <h2>${{v.name}}</h2>
+        <p>${{v.description || ''}}</p>
+        <span class="stat">${{listings.length}} Inserate</span>
+        <span class="stat">Median: ${{medianStr}}</span>
+    `;
+    card.onclick = () => showDetail(v.name);
+    grid.appendChild(card);
+}});
+
+function showDetail(name) {{
+    document.getElementById('landing').style.display = 'none';
+    document.querySelectorAll('.detail').forEach(d => d.classList.remove('active'));
+    document.getElementById('detail-' + CSS.escape(name)).classList.add('active');
+    renderCharts(name);
+}}
+
+function showLanding() {{
+    document.querySelectorAll('.detail').forEach(d => d.classList.remove('active'));
+    document.getElementById('landing').style.display = 'flex';
+}}
+
+// Build detail pages
+const container = document.getElementById('detailContainer');
+VEHICLES.forEach(v => {{
+    const div = document.createElement('div');
+    div.className = 'detail';
+    div.id = 'detail-' + v.name;
+
+    const listings = LISTINGS[v.name] || [];
+    const stats = STATS[v.name] || [];
+    const lastStat = stats[stats.length - 1];
+
+    div.innerHTML = `
+        <button class="back-btn" onclick="showLanding()">\\u2190 Alle Fahrzeuge</button>
+        <h1>${{v.name}}</h1>
+        <p class="meta">${{v.description || ''}} &middot; ${{listings.length}} aktuelle Inserate</p>
+
+        <div class="chart-card">
+            <h3>Preisentwicklung (Zoom: Bereich markieren, Doppelklick = Reset)</h3>
+            <div id="trend-${{v.name}}" style="height:350px"></div>
+        </div>
+
+        <div class="chart-card">
+            <h3>Preisverteilung</h3>
+            <div id="dist-${{v.name}}" style="height:280px"></div>
+        </div>
+
+        <div class="table-section">
+            <h3>Aktuelle Inserate</h3>
+            <div class="filters">
+                <input type="text" placeholder="Suche..." oninput="filterTable('${{v.name}}', this.closest('.filters'))">
+                <input type="number" placeholder="Preis min" oninput="filterTable('${{v.name}}', this.closest('.filters'))">
+                <input type="number" placeholder="Preis max" oninput="filterTable('${{v.name}}', this.closest('.filters'))">
+                <select onchange="filterTable('${{v.name}}', this.closest('.filters'))">
+                    <option value="">Alle Verkäufer</option>
+                    <option value="private">Privat</option>
+                    <option value="dealer">Händler</option>
+                </select>
+            </div>
+            <div class="table-wrap">
+                <table id="table-${{v.name}}">
+                    <thead><tr>
+                        <th onclick="sortTable('${{v.name}}',0,'num')">Preis <span class="sort-icon">\\u25B2\\u25BC</span></th>
+                        <th onclick="sortTable('${{v.name}}',1,'num')">Baujahr <span class="sort-icon">\\u25B2\\u25BC</span></th>
+                        <th onclick="sortTable('${{v.name}}',2,'num')">km <span class="sort-icon">\\u25B2\\u25BC</span></th>
+                        <th>Ort</th>
+                        <th>Verkäufer</th>
+                        <th>Inserat</th>
+                    </tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    `;
+    container.appendChild(div);
+
+    // Fill table
+    const tbody = div.querySelector('tbody');
+    listings.sort((a,b) => a.price - b.price);
+    listings.forEach(l => {{
+        const tr = document.createElement('tr');
+        tr.dataset.search = (l.title + ' ' + l.location + ' ' + l.seller).toLowerCase();
+        tr.dataset.price = l.price;
+        tr.dataset.seller = l.seller || '';
+        tr.innerHTML = `
+            <td>${{fmt(l.price)}}</td>
+            <td>${{l.year || '\\u2013'}}</td>
+            <td>${{fmtKm(l.km)}}</td>
+            <td>${{l.location || '\\u2013'}}</td>
+            <td>${{l.seller || '\\u2013'}}</td>
+            <td><a href="${{l.url}}" target="_blank">${{l.title || '\\u2013'}}</a></td>
+        `;
+        tbody.appendChild(tr);
+    }});
+}});
+
+const plotLayout = {{
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    font: {{ color: '#e0e0e0', size: 12 }},
+    margin: {{ l:60, r:20, t:10, b:40 }},
+    xaxis: {{ gridcolor:'#2a3a5e', linecolor:'#2a3a5e' }},
+    yaxis: {{ gridcolor:'#2a3a5e', linecolor:'#2a3a5e', ticksuffix: ' \\u20ac' }},
+    legend: {{ bgcolor:'rgba(0,0,0,0)', x:0, y:1.15, orientation:'h' }},
+    dragmode: 'zoom',
+}};
+const plotConfig = {{ responsive:true, displayModeBar:true,
+    modeBarButtonsToRemove:['lasso2d','select2d','autoScale2d'],
+    displaylogo:false }};
+
+function renderCharts(name) {{
+    const stats = STATS[name] || [];
+    const listings = LISTINGS[name] || [];
+
+    // Trend chart
+    const trendDiv = document.getElementById('trend-' + name);
+    if (stats.length > 0) {{
+        const dates = stats.map(s => s.date);
+        const traces = [
+            {{ x:dates, y:stats.map(s=>s.min), fill:'none', mode:'lines', line:{{width:0}},
+              showlegend:false, hoverinfo:'skip' }},
+            {{ x:dates, y:stats.map(s=>s.max), fill:'tonexty', fillcolor:'rgba(79,195,247,0.1)',
+              mode:'lines', line:{{width:0}}, name:'Min\\u2013Max', hoverinfo:'skip' }},
+            {{ x:dates, y:stats.map(s=>s.median), mode:'lines+markers', name:'Median',
+              line:{{color:'#4fc3f7',width:2}}, marker:{{size:7}} }},
+            {{ x:dates, y:stats.map(s=>s.avg), mode:'lines+markers', name:'Durchschnitt',
+              line:{{color:'#ff9800',width:2,dash:'dash'}}, marker:{{size:5,symbol:'square'}} }},
+        ];
+        Plotly.newPlot(trendDiv, traces, plotLayout, plotConfig);
+    }} else {{
+        trendDiv.innerHTML = '<p class="no-data">Noch keine historischen Daten.</p>';
+    }}
+
+    // Distribution chart
+    const distDiv = document.getElementById('dist-' + name);
+    if (listings.length > 0) {{
+        const prices = listings.map(l => l.price).filter(p => p > 0);
+        const median = [...prices].sort((a,b)=>a-b)[Math.floor(prices.length/2)];
+        Plotly.newPlot(distDiv, [
+            {{ x:prices, type:'histogram', marker:{{color:'rgba(79,195,247,0.6)',
+              line:{{color:'rgba(79,195,247,0.9)',width:1}}}} }},
+        ], {{
+            ...plotLayout,
+            xaxis: {{ ...plotLayout.xaxis, ticksuffix:' \\u20ac' }},
+            yaxis: {{ ...plotLayout.yaxis, ticksuffix:'', title:'Anzahl' }},
+            shapes: [{{ type:'line', x0:median, x1:median, y0:0, y1:1, yref:'paper',
+                       line:{{color:'#ef5350',width:2,dash:'dash'}} }}],
+            annotations: [{{ x:median, y:1, yref:'paper', text:'Median: '+fmt(median),
+                           showarrow:false, font:{{color:'#ef5350'}}, yshift:10 }}],
+        }}, plotConfig);
+    }} else {{
+        distDiv.innerHTML = '<p class="no-data">Keine Inserate.</p>';
+    }}
+}}
+
+// Table filtering
+function filterTable(name, filtersDiv) {{
+    const inputs = filtersDiv.querySelectorAll('input, select');
+    const search = inputs[0].value.toLowerCase();
+    const minPrice = parseFloat(inputs[1].value) || 0;
+    const maxPrice = parseFloat(inputs[2].value) || Infinity;
+    const seller = inputs[3].value;
+
+    const rows = document.querySelectorAll('#table-' + CSS.escape(name) + ' tbody tr');
+    rows.forEach(tr => {{
+        const matchSearch = !search || tr.dataset.search.includes(search);
+        const price = parseFloat(tr.dataset.price) || 0;
+        const matchPrice = price >= minPrice && price <= maxPrice;
+        const matchSeller = !seller || tr.dataset.seller === seller;
+        tr.style.display = (matchSearch && matchPrice && matchSeller) ? '' : 'none';
+    }});
+}}
+
+// Table sorting
+const sortState = {{}};
+function sortTable(name, colIdx, type) {{
+    const key = name + colIdx;
+    sortState[key] = !(sortState[key] || false);
+    const asc = sortState[key];
+
+    const tbody = document.querySelector('#table-' + CSS.escape(name) + ' tbody');
+    const rows = Array.from(tbody.rows);
+    rows.sort((a,b) => {{
+        let va = a.cells[colIdx].textContent.replace(/[^0-9,.\\-]/g,'').replace(/\\./g,'').replace(',','.');
+        let vb = b.cells[colIdx].textContent.replace(/[^0-9,.\\-]/g,'').replace(/\\./g,'').replace(',','.');
+        va = parseFloat(va) || 0; vb = parseFloat(vb) || 0;
+        return asc ? va - vb : vb - va;
+    }});
+    rows.forEach(r => tbody.appendChild(r));
+}}
+</script>
 </body>
 </html>"""
-    return html
 
 
 def main():
@@ -271,8 +437,9 @@ def main():
 
     conn = get_connection()
     try:
+        vehicles = get_vehicles(conn)
         stats = get_vehicle_stats(conn)
-        html = generate_html_report(conn, stats)
+        html = generate_html(conn, stats, vehicles)
 
         with open(output_file, "w") as f:
             f.write(html)
