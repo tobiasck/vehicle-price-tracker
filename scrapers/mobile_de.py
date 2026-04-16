@@ -227,17 +227,16 @@ class MobileDeScraper:
     async def _parse_listing_cards(self, page) -> list[dict]:
         listings = []
 
-        # Try multiple selectors for listing cards
+        # Primary: stable data-testid attributes (won't change with CSS-module renames)
+        # Fallback: href pattern which is also stable
         elements = []
         for selector in [
-            "a.link--muted.no--text--decoration",
-            "[data-testid='result-listing']",
-            "div.cBox-body--resultitem",
-            "article[data-listing-id]",
-            "a[href*='/fahrzeuge/details/']",
+            "a[data-testid^='srx-result-listing-']",
+            "a[href*='/fahrzeuge/details.html']",
         ]:
             try:
                 found = await page.query_selector_all(selector)
+                # Filter out duplicates caused by fallback selector catching same elements
                 if found:
                     elements = found
                     logger.debug("Using selector '%s' — found %d items", selector, len(found))
@@ -260,41 +259,36 @@ class MobileDeScraper:
     async def _parse_single_card(self, element) -> dict | None:
         data = {}
 
-        # Extract href
+        # The <a> tag is the card itself — href is directly on it
         href = await element.get_js_attribute("href")
         if not href:
-            # Try to find a link inside
-            link = await element.query_selector("a[href*='/fahrzeuge/details/']")
-            if link:
-                href = await link.get_js_attribute("href")
-
-        if href:
-            data["listing_url"] = href if href.startswith("http") else f"https://suchen.mobile.de{href}"
-            match = re.search(r"/details/(\d+)", href)
-            if match:
-                data["platform_id"] = match.group(1)
-            else:
-                match = re.search(r"/(\d{6,})", href)
-                if match:
-                    data["platform_id"] = match.group(1)
-
-        # Try data-listing-id
-        if "platform_id" not in data:
-            lid = await element.get_js_attribute("data-listing-id")
-            if lid:
-                data["platform_id"] = str(lid)
-
-        if "platform_id" not in data:
             return None
 
-        if "listing_url" not in data:
-            data["listing_url"] = ""
+        # Build absolute URL (hrefs are relative: /fahrzeuge/details.html?id=...)
+        data["listing_url"] = href if href.startswith("http") else f"https://suchen.mobile.de{href}"
 
-        # Get text content
+        # ID is a query param: ?id=445527390
+        match = re.search(r"[?&]id=(\d+)", href)
+        if match:
+            data["platform_id"] = match.group(1)
+        else:
+            return None
+
+        # Get full text content of the card for regex extraction
         text = await element.get_js_attribute("textContent") or ""
 
+        # Price: try dedicated element first, fall back to regex on text
+        try:
+            price_el = await element.query_selector("[data-testid='price-label']")
+            if price_el:
+                price_text = await price_el.get_js_attribute("textContent") or ""
+                data["price_cents"] = self._extract_price(price_text)
+            else:
+                data["price_cents"] = self._extract_price(text)
+        except Exception:
+            data["price_cents"] = self._extract_price(text)
+
         data["title"] = self._extract_title(text)
-        data["price_cents"] = self._extract_price(text)
         data["mileage_km"] = self._extract_mileage(text)
         data["year"] = self._extract_year(text)
         data["location"] = self._extract_location(text)
@@ -373,10 +367,9 @@ class MobileDeScraper:
     async def _get_next_page(self, page, browser, current_page_num) -> bool:
         try:
             current_url = page.url
-            match = re.search(r"pageNumber=(\d+)", current_url)
-            current_page = int(match.group(1)) if match else 1
 
-            next_page = current_page + 1
+            # Build next-page URL using pageNumber= query param
+            next_page = current_page_num + 1
             if "pageNumber=" in current_url:
                 next_url = re.sub(r"pageNumber=\d+", f"pageNumber={next_page}", current_url)
             else:
@@ -384,10 +377,13 @@ class MobileDeScraper:
                 next_url = f"{current_url}{separator}pageNumber={next_page}"
 
             page = await browser.get(next_url)
-            await asyncio.sleep(random.uniform(2, 4))
+            await asyncio.sleep(random.uniform(3, 5))
 
-            # Check if we got results
-            for selector in ["a.link--muted", "[data-testid='result-listing']", "a[href*='/fahrzeuge/details/']"]:
+            # Check if we got listing results on this page
+            for selector in [
+                "a[data-testid^='srx-result-listing-']",
+                "a[href*='/fahrzeuge/details.html']",
+            ]:
                 try:
                     found = await page.query_selector_all(selector)
                     if found:
