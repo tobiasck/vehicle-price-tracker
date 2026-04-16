@@ -10,7 +10,7 @@ echo "=== Vehicle Scraper Setup ==="
 # xvfb is required so nodriver can run a *headful* Chrome under a virtual
 # display — mobile.de's bot manager detects headless mode reliably.
 apt update
-apt install -y python3 python3-venv python3-pip postgresql postgresql-client chromium xvfb
+apt install -y python3 python3-venv python3-pip postgresql postgresql-client chromium xvfb xauth
 
 # 2. Create scraper user
 if ! id -u scraper &>/dev/null; then
