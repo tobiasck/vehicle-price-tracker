@@ -137,6 +137,12 @@ class MobileDeScraper:
                 listings = await self._parse_listing_cards(page)
                 logger.info("Found %d listings on page %d", len(listings), page_num)
 
+                # Stop if no valid listings parsed — avoids infinite loops on
+                # pages where the selector matches ads/empty elements only.
+                if not listings:
+                    logger.info("No listings on page %d — stopping pagination", page_num)
+                    break
+
                 for listing_data in listings:
                     if dry_run:
                         logger.info("[DRY RUN] %s", listing_data)
@@ -274,21 +280,14 @@ class MobileDeScraper:
         else:
             return None
 
-        # Get full text content of the card for regex extraction
+        # Get full text content of the card — nodriver Element objects do not
+        # support child query_selector, so we parse everything via regex on text.
         text = await element.get_js_attribute("textContent") or ""
-
-        # Price: try dedicated element first, fall back to regex on text
-        try:
-            price_el = await element.query_selector("[data-testid='price-label']")
-            if price_el:
-                price_text = await price_el.get_js_attribute("textContent") or ""
-                data["price_cents"] = self._extract_price(price_text)
-            else:
-                data["price_cents"] = self._extract_price(text)
-        except Exception:
-            data["price_cents"] = self._extract_price(text)
+        if not text.strip():
+            return None
 
         data["title"] = self._extract_title(text)
+        data["price_cents"] = self._extract_price(text)
         data["mileage_km"] = self._extract_mileage(text)
         data["year"] = self._extract_year(text)
         data["location"] = self._extract_location(text)
