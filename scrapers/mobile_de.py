@@ -44,12 +44,24 @@ class MobileDeScraper:
         total_listings = 0
         browser = None
         try:
+            # Run *headful* under Xvfb on the VM. nodriver in headless mode
+             # leaks too many automation signals for mobile.de's bot manager.
+            user_agent = random.choice(USER_AGENTS)
+            viewport_w = random.choice([1280, 1366, 1440, 1536, 1600, 1920])
+            viewport_h = random.choice([720, 800, 864, 900, 1080])
+
             browser = await nodriver.start(
-                headless=True,
+                headless=False,
                 lang="de-DE",
                 browser_args=[
-                    f"--user-agent={random.choice(USER_AGENTS)}",
+                    f"--user-agent={user_agent}",
+                    f"--window-size={viewport_w},{viewport_h}",
                     "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-dev-shm-usage",
+                    "--start-maximized",
                 ],
             )
 

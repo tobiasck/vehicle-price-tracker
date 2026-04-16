@@ -7,7 +7,7 @@ Type=oneshot
 User=scraper
 WorkingDirectory=/opt/mobile-scraper
 EnvironmentFile=/opt/mobile-scraper/.env
-ExecStart=/opt/mobile-scraper/venv/bin/python main.py
+ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1920x1080x24" /opt/mobile-scraper/venv/bin/python main.py
 ExecStartPost=/opt/mobile-scraper/venv/bin/python report.py
 TimeoutStartSec=600
 StandardOutput=journal

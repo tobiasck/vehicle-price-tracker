@@ -7,8 +7,10 @@ set -e
 echo "=== Vehicle Scraper Setup ==="
 
 # 1. System packages — use python3 (works on Debian Trixie, Ubuntu 22+)
+# xvfb is required so nodriver can run a *headful* Chrome under a virtual
+# display — mobile.de's bot manager detects headless mode reliably.
 apt update
-apt install -y python3 python3-venv python3-pip postgresql postgresql-client chromium
+apt install -y python3 python3-venv python3-pip postgresql postgresql-client chromium xvfb
 
 # 2. Create scraper user
 if ! id -u scraper &>/dev/null; then
