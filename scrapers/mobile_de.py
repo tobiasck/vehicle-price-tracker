@@ -129,6 +129,10 @@ class MobileDeScraper:
             page_num = 1
             while True:
                 logger.info("Parsing page %d", page_num)
+
+                # Wait for React to render listing cards (SPA — DOM is built client-side)
+                await self._wait_for_listings(page)
+
                 await self._human_scroll(page)
 
                 if self.debug:
@@ -229,6 +233,26 @@ class MobileDeScraper:
             logger.info("Debug saved: %s", prefix)
         except Exception as e:
             logger.warning("Failed to save debug for %s: %s", prefix, e)
+
+    async def _wait_for_listings(self, page, timeout=30):
+        """Poll until listing cards appear in the DOM (React SPA renders async)."""
+        js_count = """
+        (() => {
+            const sel1 = document.querySelectorAll("a[data-testid^='srx-result-listing-']").length;
+            const sel2 = document.querySelectorAll("a[href*='/fahrzeuge/details.html']").length;
+            return Math.max(sel1, sel2);
+        })()
+        """
+        for attempt in range(timeout // 2):
+            try:
+                count = await page.evaluate(js_count)
+                if count and int(count) > 0:
+                    logger.info("Listings appeared in DOM after ~%ds (%d cards)", attempt * 2, count)
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+        logger.warning("Listings did not appear in DOM after %ds — proceeding anyway", timeout)
 
     async def _parse_listing_cards(self, page) -> list[dict]:
         """Extract all listing cards via a single JS evaluation — avoids
