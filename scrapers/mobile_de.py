@@ -9,7 +9,6 @@ import nodriver
 from config.settings import (
     MIN_PAGE_DELAY, MAX_PAGE_DELAY,
     BLOCK_RETRY_WAIT_MIN, BLOCK_RETRY_WAIT_MAX, MAX_RETRIES,
-    USER_AGENTS,
 )
 from db.models import (
     create_scrape_run, finish_scrape_run,
@@ -45,8 +44,10 @@ class MobileDeScraper:
         browser = None
         try:
             # Run *headful* under Xvfb on the VM. nodriver in headless mode
-             # leaks too many automation signals for mobile.de's bot manager.
-            user_agent = random.choice(USER_AGENTS)
+            # leaks too many automation signals for mobile.de's bot manager.
+            # Do NOT override --user-agent: let Chromium report its own native
+            # UA so it stays consistent with the actual browser version,
+            # platform and all other fingerprint signals.
             viewport_w = random.choice([1280, 1366, 1440, 1536, 1600, 1920])
             viewport_h = random.choice([720, 800, 864, 900, 1080])
 
@@ -54,7 +55,6 @@ class MobileDeScraper:
                 headless=False,
                 lang="de-DE",
                 browser_args=[
-                    f"--user-agent={user_agent}",
                     f"--window-size={viewport_w},{viewport_h}",
                     "--disable-blink-features=AutomationControlled",
                     "--disable-features=IsolateOrigins,site-per-process",
