@@ -15,6 +15,14 @@ logger = logging.getLogger(__name__)
 REPORT_DIR = os.path.join(os.path.dirname(__file__), "report")
 
 
+def slugify(name):
+    """Convert vehicle name to a safe HTML id slug."""
+    import re
+    s = name.lower().strip()
+    s = re.sub(r'[^a-z0-9]+', '-', s)
+    return s.strip('-')
+
+
 def get_vehicles(conn):
     with conn.cursor() as cur:
         cur.execute("""
@@ -118,7 +126,8 @@ def generate_html(conn, stats, vehicles):
     stats_json = json.dumps(serialize_stats(stats))
     listings_json = json.dumps(serialize_listings(conn, vehicles))
     vehicles_json = json.dumps([{"name": v["name"], "description": v["description"],
-                                  "total_listings": int(v["total_listings"])} for v in vehicles])
+                                  "total_listings": int(v["total_listings"]),
+                                  "slug": slugify(v["name"])} for v in vehicles])
 
     return f"""<!DOCTYPE html>
 <html lang="de">
@@ -129,31 +138,29 @@ def generate_html(conn, stats, vehicles):
 <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
 <style>
 :root {{
-    --bg: #1a1a2e; --bg2: #16213e; --card: #1e2a4a; --border: #2a3a5e;
-    --text: #e0e0e0; --text2: #8892a8; --accent: #4fc3f7; --accent2: #ff9800;
+    --bg: #121212; --bg2: #1e1e1e; --card: #252525; --border: #383838;
+    --text: #e0e0e0; --text2: #888; --accent: #90caf9; --accent2: #ffb74d;
     --danger: #ef5350; --success: #66bb6a;
 }}
 * {{ margin:0; padding:0; box-sizing:border-box; }}
 body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
        background:var(--bg); color:var(--text); }}
 
-/* Landing page */
 .landing {{ min-height:100vh; display:flex; flex-direction:column; align-items:center;
            justify-content:center; padding:40px 20px; }}
-.landing h1 {{ font-size:2.2em; margin-bottom:8px; color:var(--accent); }}
+.landing h1 {{ font-size:2.2em; margin-bottom:8px; color:#fff; }}
 .landing .subtitle {{ color:var(--text2); margin-bottom:40px; }}
 .vehicle-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr));
                 gap:20px; max-width:800px; width:100%; }}
 .vehicle-card {{ background:var(--card); border:1px solid var(--border); border-radius:12px;
                 padding:28px; cursor:pointer; transition:all 0.2s; }}
 .vehicle-card:hover {{ border-color:var(--accent); transform:translateY(-3px);
-                      box-shadow:0 8px 25px rgba(79,195,247,0.15); }}
+                      box-shadow:0 8px 25px rgba(0,0,0,0.4); }}
 .vehicle-card h2 {{ font-size:1.3em; margin-bottom:8px; color:#fff; }}
 .vehicle-card p {{ color:var(--text2); font-size:0.9em; }}
 .vehicle-card .stat {{ display:inline-block; background:var(--bg2); padding:4px 10px;
                       border-radius:6px; font-size:0.8em; margin-top:12px; color:var(--accent); }}
 
-/* Detail page */
 .detail {{ display:none; max-width:1100px; margin:0 auto; padding:20px; }}
 .detail.active {{ display:block; }}
 .back-btn {{ background:none; border:1px solid var(--border); color:var(--accent);
@@ -167,7 +174,6 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-seri
               margin-bottom:20px; border:1px solid var(--border); }}
 .chart-card h3 {{ color:var(--text2); font-size:0.95em; margin-bottom:12px; font-weight:500; }}
 
-/* Table section */
 .table-section {{ background:var(--card); border-radius:10px; padding:20px;
                  border:1px solid var(--border); }}
 .table-section h3 {{ color:var(--text2); font-size:0.95em; margin-bottom:12px; font-weight:500; }}
@@ -183,7 +189,7 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-seri
 .table-wrap::-webkit-scrollbar {{ width:6px; }}
 .table-wrap::-webkit-scrollbar-track {{ background:var(--bg2); border-radius:3px; }}
 .table-wrap::-webkit-scrollbar-thumb {{ background:var(--border); border-radius:3px; }}
-.table-wrap::-webkit-scrollbar-thumb:hover {{ background:var(--accent); }}
+.table-wrap::-webkit-scrollbar-thumb:hover {{ background:#555; }}
 
 table {{ width:100%; border-collapse:collapse; font-size:0.85em; }}
 thead {{ position:sticky; top:0; z-index:1; }}
@@ -193,7 +199,7 @@ th {{ background:var(--bg2); padding:10px 12px; text-align:left; font-weight:600
 th:hover {{ color:var(--accent); }}
 th .sort-icon {{ margin-left:4px; font-size:0.7em; }}
 td {{ padding:8px 12px; border-bottom:1px solid var(--border); white-space:nowrap; }}
-tr:hover {{ background:rgba(79,195,247,0.05); }}
+tr:hover {{ background:rgba(255,255,255,0.03); }}
 a {{ color:var(--accent); text-decoration:none; }}
 a:hover {{ text-decoration:underline; }}
 .no-data {{ text-align:center; padding:40px; color:var(--text2); }}
@@ -201,14 +207,12 @@ a:hover {{ text-decoration:underline; }}
 </head>
 <body>
 
-<!-- Landing Page -->
 <div class="landing" id="landing">
     <h1>Fahrzeug-Preistracker</h1>
     <p class="subtitle">Letzte Aktualisierung: {now}</p>
     <div class="vehicle-grid" id="vehicleGrid"></div>
 </div>
 
-<!-- Detail Pages (one per vehicle, generated by JS) -->
 <div id="detailContainer"></div>
 
 <script>
@@ -219,9 +223,9 @@ const VEHICLES = {vehicles_json};
 const fmt = n => n != null ? n.toLocaleString('de-DE', {{maximumFractionDigits:0}}) + ' \\u20ac' : '\\u2013';
 const fmtKm = n => n != null ? n.toLocaleString('de-DE') + ' km' : '\\u2013';
 
-// Build landing page
+// Landing page
 const grid = document.getElementById('vehicleGrid');
-VEHICLES.forEach(v => {{
+VEHICLES.forEach((v, idx) => {{
     const listings = LISTINGS[v.name] || [];
     const stats = STATS[v.name] || [];
     const lastStat = stats[stats.length - 1];
@@ -235,15 +239,16 @@ VEHICLES.forEach(v => {{
         <span class="stat">${{listings.length}} Inserate</span>
         <span class="stat">Median: ${{medianStr}}</span>
     `;
-    card.onclick = () => showDetail(v.name);
+    card.onclick = () => showDetail(v.slug, v.name);
     grid.appendChild(card);
 }});
 
-function showDetail(name) {{
+function showDetail(slug, name) {{
     document.getElementById('landing').style.display = 'none';
     document.querySelectorAll('.detail').forEach(d => d.classList.remove('active'));
-    document.getElementById('detail-' + CSS.escape(name)).classList.add('active');
-    renderCharts(name);
+    const el = document.getElementById('detail-' + slug);
+    if (el) {{ el.classList.add('active'); }}
+    renderCharts(slug, name);
 }}
 
 function showLanding() {{
@@ -251,16 +256,15 @@ function showLanding() {{
     document.getElementById('landing').style.display = 'flex';
 }}
 
-// Build detail pages
+// Detail pages
 const container = document.getElementById('detailContainer');
 VEHICLES.forEach(v => {{
+    const slug = v.slug;
     const div = document.createElement('div');
     div.className = 'detail';
-    div.id = 'detail-' + v.name;
+    div.id = 'detail-' + slug;
 
     const listings = LISTINGS[v.name] || [];
-    const stats = STATS[v.name] || [];
-    const lastStat = stats[stats.length - 1];
 
     div.innerHTML = `
         <button class="back-btn" onclick="showLanding()">\\u2190 Alle Fahrzeuge</button>
@@ -269,32 +273,32 @@ VEHICLES.forEach(v => {{
 
         <div class="chart-card">
             <h3>Preisentwicklung (Zoom: Bereich markieren, Doppelklick = Reset)</h3>
-            <div id="trend-${{v.name}}" style="height:350px"></div>
+            <div id="trend-${{slug}}" style="height:350px"></div>
         </div>
 
         <div class="chart-card">
             <h3>Preisverteilung</h3>
-            <div id="dist-${{v.name}}" style="height:280px"></div>
+            <div id="dist-${{slug}}" style="height:280px"></div>
         </div>
 
         <div class="table-section">
             <h3>Aktuelle Inserate</h3>
             <div class="filters">
-                <input type="text" placeholder="Suche..." oninput="filterTable('${{v.name}}', this.closest('.filters'))">
-                <input type="number" placeholder="Preis min" oninput="filterTable('${{v.name}}', this.closest('.filters'))">
-                <input type="number" placeholder="Preis max" oninput="filterTable('${{v.name}}', this.closest('.filters'))">
-                <select onchange="filterTable('${{v.name}}', this.closest('.filters'))">
+                <input type="text" placeholder="Suche..." oninput="filterTable('${{slug}}', this.closest('.filters'))">
+                <input type="number" placeholder="Preis min" oninput="filterTable('${{slug}}', this.closest('.filters'))">
+                <input type="number" placeholder="Preis max" oninput="filterTable('${{slug}}', this.closest('.filters'))">
+                <select onchange="filterTable('${{slug}}', this.closest('.filters'))">
                     <option value="">Alle Verkäufer</option>
                     <option value="private">Privat</option>
                     <option value="dealer">Händler</option>
                 </select>
             </div>
             <div class="table-wrap">
-                <table id="table-${{v.name}}">
+                <table id="table-${{slug}}">
                     <thead><tr>
-                        <th onclick="sortTable('${{v.name}}',0,'num')">Preis <span class="sort-icon">\\u25B2\\u25BC</span></th>
-                        <th onclick="sortTable('${{v.name}}',1,'num')">Baujahr <span class="sort-icon">\\u25B2\\u25BC</span></th>
-                        <th onclick="sortTable('${{v.name}}',2,'num')">km <span class="sort-icon">\\u25B2\\u25BC</span></th>
+                        <th onclick="sortTable('${{slug}}',0)">Preis <span class="sort-icon">\\u25B2\\u25BC</span></th>
+                        <th onclick="sortTable('${{slug}}',1)">Baujahr <span class="sort-icon">\\u25B2\\u25BC</span></th>
+                        <th onclick="sortTable('${{slug}}',2)">km <span class="sort-icon">\\u25B2\\u25BC</span></th>
                         <th>Ort</th>
                         <th>Verkäufer</th>
                         <th>Inserat</th>
@@ -331,8 +335,8 @@ const plotLayout = {{
     plot_bgcolor: 'rgba(0,0,0,0)',
     font: {{ color: '#e0e0e0', size: 12 }},
     margin: {{ l:60, r:20, t:10, b:40 }},
-    xaxis: {{ gridcolor:'#2a3a5e', linecolor:'#2a3a5e' }},
-    yaxis: {{ gridcolor:'#2a3a5e', linecolor:'#2a3a5e', ticksuffix: ' \\u20ac' }},
+    xaxis: {{ gridcolor:'#333', linecolor:'#333' }},
+    yaxis: {{ gridcolor:'#333', linecolor:'#333', ticksuffix: ' \\u20ac' }},
     legend: {{ bgcolor:'rgba(0,0,0,0)', x:0, y:1.15, orientation:'h' }},
     dragmode: 'zoom',
 }};
@@ -340,37 +344,35 @@ const plotConfig = {{ responsive:true, displayModeBar:true,
     modeBarButtonsToRemove:['lasso2d','select2d','autoScale2d'],
     displaylogo:false }};
 
-function renderCharts(name) {{
+function renderCharts(slug, name) {{
     const stats = STATS[name] || [];
     const listings = LISTINGS[name] || [];
 
-    // Trend chart
-    const trendDiv = document.getElementById('trend-' + name);
+    const trendDiv = document.getElementById('trend-' + slug);
     if (stats.length > 0) {{
         const dates = stats.map(s => s.date);
         const traces = [
             {{ x:dates, y:stats.map(s=>s.min), fill:'none', mode:'lines', line:{{width:0}},
               showlegend:false, hoverinfo:'skip' }},
-            {{ x:dates, y:stats.map(s=>s.max), fill:'tonexty', fillcolor:'rgba(79,195,247,0.1)',
+            {{ x:dates, y:stats.map(s=>s.max), fill:'tonexty', fillcolor:'rgba(144,202,249,0.08)',
               mode:'lines', line:{{width:0}}, name:'Min\\u2013Max', hoverinfo:'skip' }},
             {{ x:dates, y:stats.map(s=>s.median), mode:'lines+markers', name:'Median',
-              line:{{color:'#4fc3f7',width:2}}, marker:{{size:7}} }},
+              line:{{color:'#90caf9',width:2}}, marker:{{size:7}} }},
             {{ x:dates, y:stats.map(s=>s.avg), mode:'lines+markers', name:'Durchschnitt',
-              line:{{color:'#ff9800',width:2,dash:'dash'}}, marker:{{size:5,symbol:'square'}} }},
+              line:{{color:'#ffb74d',width:2,dash:'dash'}}, marker:{{size:5,symbol:'square'}} }},
         ];
         Plotly.newPlot(trendDiv, traces, plotLayout, plotConfig);
     }} else {{
         trendDiv.innerHTML = '<p class="no-data">Noch keine historischen Daten.</p>';
     }}
 
-    // Distribution chart
-    const distDiv = document.getElementById('dist-' + name);
+    const distDiv = document.getElementById('dist-' + slug);
     if (listings.length > 0) {{
         const prices = listings.map(l => l.price).filter(p => p > 0);
         const median = [...prices].sort((a,b)=>a-b)[Math.floor(prices.length/2)];
         Plotly.newPlot(distDiv, [
-            {{ x:prices, type:'histogram', marker:{{color:'rgba(79,195,247,0.6)',
-              line:{{color:'rgba(79,195,247,0.9)',width:1}}}} }},
+            {{ x:prices, type:'histogram', marker:{{color:'rgba(144,202,249,0.5)',
+              line:{{color:'rgba(144,202,249,0.8)',width:1}}}} }},
         ], {{
             ...plotLayout,
             xaxis: {{ ...plotLayout.xaxis, ticksuffix:' \\u20ac' }},
@@ -385,15 +387,14 @@ function renderCharts(name) {{
     }}
 }}
 
-// Table filtering
-function filterTable(name, filtersDiv) {{
+function filterTable(slug, filtersDiv) {{
     const inputs = filtersDiv.querySelectorAll('input, select');
     const search = inputs[0].value.toLowerCase();
     const minPrice = parseFloat(inputs[1].value) || 0;
     const maxPrice = parseFloat(inputs[2].value) || Infinity;
     const seller = inputs[3].value;
 
-    const rows = document.querySelectorAll('#table-' + CSS.escape(name) + ' tbody tr');
+    const rows = document.querySelectorAll('#table-' + slug + ' tbody tr');
     rows.forEach(tr => {{
         const matchSearch = !search || tr.dataset.search.includes(search);
         const price = parseFloat(tr.dataset.price) || 0;
@@ -403,14 +404,13 @@ function filterTable(name, filtersDiv) {{
     }});
 }}
 
-// Table sorting
 const sortState = {{}};
-function sortTable(name, colIdx, type) {{
-    const key = name + colIdx;
+function sortTable(slug, colIdx) {{
+    const key = slug + colIdx;
     sortState[key] = !(sortState[key] || false);
     const asc = sortState[key];
 
-    const tbody = document.querySelector('#table-' + CSS.escape(name) + ' tbody');
+    const tbody = document.querySelector('#table-' + slug + ' tbody');
     const rows = Array.from(tbody.rows);
     rows.sort((a,b) => {{
         let va = a.cells[colIdx].textContent.replace(/[^0-9,.\\-]/g,'').replace(/\\./g,'').replace(',','.');
