@@ -235,8 +235,10 @@ class MobileDeScraper:
         unreliable per-element nodriver attribute access."""
         listings = []
 
+        # Note: nodriver evaluate() runs the expression as-is via Runtime.evaluate,
+        # so we need an IIFE — a bare arrow function is never called.
         js = """
-        () => {
+        (() => {
             const selectors = [
                 "a[data-testid^='srx-result-listing-']",
                 "a[href*='/fahrzeuge/details.html']"
@@ -250,7 +252,7 @@ class MobileDeScraper:
                 href: c.href || c.getAttribute('href') || '',
                 text: c.textContent || ''
             }));
-        }
+        })()
         """
         try:
             raw_cards = await page.evaluate(js)
