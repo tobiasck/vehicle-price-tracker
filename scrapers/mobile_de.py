@@ -231,69 +231,78 @@ class MobileDeScraper:
             logger.warning("Failed to save debug for %s: %s", prefix, e)
 
     async def _parse_listing_cards(self, page) -> list[dict]:
+        """Extract all listing cards via a single JS evaluation — avoids
+        unreliable per-element nodriver attribute access."""
         listings = []
 
-        # Primary: stable data-testid attributes (won't change with CSS-module renames)
-        # Fallback: href pattern which is also stable
-        elements = []
-        for selector in [
-            "a[data-testid^='srx-result-listing-']",
-            "a[href*='/fahrzeuge/details.html']",
-        ]:
-            try:
-                found = await page.query_selector_all(selector)
-                # Filter out duplicates caused by fallback selector catching same elements
-                if found:
-                    elements = found
-                    logger.debug("Using selector '%s' — found %d items", selector, len(found))
-                    break
-            except Exception:
-                continue
+        js = """
+        () => {
+            const selectors = [
+                "a[data-testid^='srx-result-listing-']",
+                "a[href*='/fahrzeuge/details.html']"
+            ];
+            let cards = [];
+            for (const sel of selectors) {
+                cards = Array.from(document.querySelectorAll(sel));
+                if (cards.length > 0) break;
+            }
+            return cards.map(c => ({
+                href: c.href || c.getAttribute('href') || '',
+                text: c.textContent || ''
+            }));
+        }
+        """
+        try:
+            raw_cards = await page.evaluate(js)
+        except Exception as e:
+            logger.warning("JS evaluation failed: %s", e)
+            return listings
 
-        for i, element in enumerate(elements):
+        if not raw_cards:
+            return listings
+
+        logger.debug("JS extracted %d raw cards", len(raw_cards))
+
+        seen_ids = set()
+        for card in raw_cards:
             try:
-                listing = await self._parse_single_card(element)
+                listing = self._parse_card_data(card.get("href", ""), card.get("text", ""))
                 if listing and listing.get("platform_id"):
-                    if not any(l["platform_id"] == listing["platform_id"] for l in listings):
+                    if listing["platform_id"] not in seen_ids:
+                        seen_ids.add(listing["platform_id"])
                         listings.append(listing)
             except Exception as e:
-                logger.warning("Failed to parse listing card %d: %s", i, e)
-                continue
+                logger.warning("Failed to parse card: %s", e)
 
         return listings
 
-    async def _parse_single_card(self, element) -> dict | None:
-        data = {}
-
-        # The <a> tag is the card itself — href is directly on it
-        href = await element.get_js_attribute("href")
+    def _parse_card_data(self, href: str, text: str) -> dict | None:
+        """Parse a single listing card from its href and text content."""
         if not href:
             return None
 
-        # Build absolute URL (hrefs are relative: /fahrzeuge/details.html?id=...)
-        data["listing_url"] = href if href.startswith("http") else f"https://suchen.mobile.de{href}"
+        # Build absolute URL
+        listing_url = href if href.startswith("http") else f"https://suchen.mobile.de{href}"
 
         # ID is a query param: ?id=445527390
         match = re.search(r"[?&]id=(\d+)", href)
-        if match:
-            data["platform_id"] = match.group(1)
-        else:
+        if not match:
             return None
+        platform_id = match.group(1)
 
-        # Get full text content of the card — nodriver Element objects do not
-        # support child query_selector, so we parse everything via regex on text.
-        text = await element.get_js_attribute("textContent") or ""
         if not text.strip():
             return None
 
-        data["title"] = self._extract_title(text)
-        data["price_cents"] = self._extract_price(text)
-        data["mileage_km"] = self._extract_mileage(text)
-        data["year"] = self._extract_year(text)
-        data["location"] = self._extract_location(text)
-        data["seller_type"] = self._extract_seller_type(text)
-
-        return data
+        return {
+            "platform_id": platform_id,
+            "listing_url": listing_url,
+            "title": self._extract_title(text),
+            "price_cents": self._extract_price(text),
+            "mileage_km": self._extract_mileage(text),
+            "year": self._extract_year(text),
+            "location": self._extract_location(text),
+            "seller_type": self._extract_seller_type(text),
+        }
 
     def _save_listing(self, run_id, data):
         listing_id = upsert_listing(
