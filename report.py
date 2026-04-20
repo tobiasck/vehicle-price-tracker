@@ -161,6 +161,53 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-seri
 .vehicle-card .stat {{ display:inline-block; background:var(--bg2); padding:4px 10px;
                       border-radius:6px; font-size:0.8em; margin-top:12px; color:var(--accent); }}
 
+/* Admin buttons */
+.btn {{ display:inline-flex; align-items:center; gap:6px; padding:9px 18px; border-radius:7px;
+       font-size:0.88em; font-weight:500; cursor:pointer; border:none; transition:all 0.18s; }}
+.btn-primary {{ background:#2979ff; color:#fff; }}
+.btn-primary:hover {{ background:#448aff; }}
+.btn-success {{ background:#2e7d32; color:#fff; }}
+.btn-success:hover {{ background:#388e3c; }}
+.btn-outline {{ background:none; border:1px solid var(--border); color:var(--text); }}
+.btn-outline:hover {{ border-color:var(--accent); color:var(--accent); }}
+.landing-actions {{ display:flex; gap:12px; margin-bottom:32px; }}
+
+/* Modal */
+.modal-overlay {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7);
+                 z-index:100; align-items:center; justify-content:center; }}
+.modal-overlay.open {{ display:flex; }}
+.modal {{ background:var(--card); border:1px solid var(--border); border-radius:12px;
+         padding:28px; width:100%; max-width:500px; }}
+.modal h2 {{ font-size:1.2em; margin-bottom:20px; color:#fff; }}
+.form-group {{ margin-bottom:14px; }}
+.form-group label {{ display:block; font-size:0.82em; color:var(--text2);
+                    margin-bottom:5px; font-weight:500; }}
+.form-group input, .form-group select, .form-group textarea {{
+    width:100%; background:var(--bg2); border:1px solid var(--border);
+    color:var(--text); padding:9px 12px; border-radius:6px; font-size:0.88em;
+    outline:none; font-family:inherit; }}
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus {{
+    border-color:var(--accent); }}
+.form-group textarea {{ resize:vertical; min-height:60px; }}
+.modal-actions {{ display:flex; gap:10px; justify-content:flex-end; margin-top:20px; }}
+.modal-msg {{ font-size:0.85em; padding:8px 12px; border-radius:6px; margin-top:10px;
+             display:none; }}
+.modal-msg.success {{ background:#1b5e20; color:#a5d6a7; display:block; }}
+.modal-msg.error {{ background:#b71c1c; color:#ffcdd2; display:block; }}
+
+/* Run status bar */
+.run-status {{ display:none; position:fixed; bottom:20px; right:20px; z-index:200;
+              background:var(--card); border:1px solid var(--border); border-radius:10px;
+              padding:14px 18px; min-width:260px; box-shadow:0 4px 20px rgba(0,0,0,0.5); }}
+.run-status.visible {{ display:block; }}
+.run-status-title {{ font-weight:600; margin-bottom:6px; color:#fff; font-size:0.9em; }}
+.run-status-log {{ font-size:0.75em; color:var(--text2); max-height:120px; overflow-y:auto;
+                  font-family:monospace; }}
+.spinner {{ display:inline-block; width:10px; height:10px; border:2px solid var(--border);
+           border-top-color:var(--accent); border-radius:50%;
+           animation:spin 0.7s linear infinite; margin-right:6px; }}
+@keyframes spin {{ to {{ transform:rotate(360deg); }} }}
+
 .detail {{ display:none; max-width:1100px; margin:0 auto; padding:20px; }}
 .detail.active {{ display:block; }}
 .back-btn {{ background:none; border:1px solid var(--border); color:var(--accent);
@@ -210,10 +257,58 @@ a:hover {{ text-decoration:underline; }}
 <div class="landing" id="landing">
     <h1>Fahrzeug-Preistracker</h1>
     <p class="subtitle">Letzte Aktualisierung: {now}</p>
+    <div class="landing-actions">
+        <button class="btn btn-success" onclick="startRun()">
+            &#9654; Jetzt scrapen
+        </button>
+        <button class="btn btn-primary" onclick="openAddModal()">
+            &#43; Fahrzeug hinzufügen
+        </button>
+    </div>
     <div class="vehicle-grid" id="vehicleGrid"></div>
 </div>
 
 <div id="detailContainer"></div>
+
+<!-- Add vehicle modal -->
+<div class="modal-overlay" id="addModal">
+    <div class="modal">
+        <h2>&#43; Fahrzeug hinzufügen</h2>
+        <div class="form-group">
+            <label>Name *</label>
+            <input id="add-name" type="text" placeholder="z.B. BMW Z3 2.8 Vorfacelift">
+        </div>
+        <div class="form-group">
+            <label>Beschreibung</label>
+            <input id="add-desc" type="text" placeholder="z.B. E36/7, Baujahr 1996-1998">
+        </div>
+        <div class="form-group">
+            <label>Plattform *</label>
+            <select id="add-platform">
+                <option value="mobile_de">mobile.de</option>
+                <option value="autoscout24">AutoScout24</option>
+                <option value="kleinanzeigen">Kleinanzeigen</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Such-URL *</label>
+            <textarea id="add-url" placeholder="https://suchen.mobile.de/fahrzeuge/search.html?..."></textarea>
+        </div>
+        <div id="add-msg" class="modal-msg"></div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeAddModal()">Abbrechen</button>
+            <button class="btn btn-primary" onclick="submitAddVehicle()">Hinzufügen</button>
+        </div>
+    </div>
+</div>
+
+<!-- Run status bar -->
+<div class="run-status" id="runStatus">
+    <div class="run-status-title" id="runStatusTitle">
+        <span class="spinner" id="runSpinner"></span>Scrape läuft...
+    </div>
+    <div class="run-status-log" id="runStatusLog"></div>
+</div>
 
 <script>
 const STATS = {stats_json};
@@ -419,6 +514,104 @@ function sortTable(slug, colIdx) {{
         return asc ? va - vb : vb - va;
     }});
     rows.forEach(r => tbody.appendChild(r));
+}}
+
+// ── Admin: scrape run ────────────────────────────────────────────────────────
+let _pollInterval = null;
+
+async function startRun(target) {{
+    const res = await fetch('/api/run', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify(target ? {{target}} : {{}})
+    }});
+    const data = await res.json();
+    if (res.status === 409) {{
+        alert('Scrape läuft bereits — bitte warten.');
+        return;
+    }}
+    if (res.ok) {{
+        showRunStatus();
+        startPolling();
+    }}
+}}
+
+function showRunStatus() {{
+    document.getElementById('runStatus').classList.add('visible');
+    document.getElementById('runStatusTitle').innerHTML =
+        '<span class="spinner" id="runSpinner"></span>Scrape läuft...';
+    document.getElementById('runStatusLog').textContent = '';
+}}
+
+function startPolling() {{
+    if (_pollInterval) clearInterval(_pollInterval);
+    _pollInterval = setInterval(pollStatus, 1500);
+}}
+
+async function pollStatus() {{
+    try {{
+        const res = await fetch('/api/status');
+        const data = await res.json();
+
+        const logEl = document.getElementById('runStatusLog');
+        logEl.textContent = (data.log || []).slice(-15).join('\\n');
+        logEl.scrollTop = logEl.scrollHeight;
+
+        if (!data.running) {{
+            clearInterval(_pollInterval);
+            _pollInterval = null;
+            const ok = data.exit_code === 0;
+            document.getElementById('runStatusTitle').innerHTML =
+                ok ? '&#10003; Scrape abgeschlossen' : '&#10007; Scrape fehlgeschlagen';
+            // Reload page after 3s to show fresh data
+            setTimeout(() => location.reload(), 3000);
+        }}
+    }} catch(e) {{}}
+}}
+
+// ── Admin: add vehicle modal ─────────────────────────────────────────────────
+function openAddModal() {{
+    document.getElementById('addModal').classList.add('open');
+    document.getElementById('add-msg').className = 'modal-msg';
+    document.getElementById('add-msg').textContent = '';
+}}
+
+function closeAddModal() {{
+    document.getElementById('addModal').classList.remove('open');
+}}
+
+document.getElementById('addModal').addEventListener('click', function(e) {{
+    if (e.target === this) closeAddModal();
+}});
+
+async function submitAddVehicle() {{
+    const name = document.getElementById('add-name').value.trim();
+    const desc = document.getElementById('add-desc').value.trim();
+    const platform = document.getElementById('add-platform').value;
+    const url = document.getElementById('add-url').value.trim();
+    const msg = document.getElementById('add-msg');
+
+    if (!name || !url) {{
+        msg.className = 'modal-msg error';
+        msg.textContent = 'Name und Such-URL sind Pflichtfelder.';
+        return;
+    }}
+
+    const res = await fetch('/api/vehicle/add', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{name, description: desc, platform, search_url: url}})
+    }});
+    const data = await res.json();
+
+    if (res.ok) {{
+        msg.className = 'modal-msg success';
+        msg.textContent = 'Fahrzeug hinzugefügt! Seite wird neu geladen...';
+        setTimeout(() => location.reload(), 1500);
+    }} else {{
+        msg.className = 'modal-msg error';
+        msg.textContent = data.error || 'Fehler beim Hinzufügen.';
+    }}
 }}
 </script>
 </body>

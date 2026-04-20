@@ -1,14 +1,15 @@
 [Unit]
-Description=Vehicle Price Tracker Report Web Server
-After=network-online.target
+Description=Vehicle Price Tracker Web Server
+After=network-online.target postgresql.service
 
 [Service]
 Type=simple
 User=scraper
-WorkingDirectory=/opt/mobile-scraper/report
-ExecStart=/usr/bin/python3 -m http.server 8080 --bind 0.0.0.0
+WorkingDirectory=/opt/mobile-scraper
+ExecStart=/opt/mobile-scraper/venv/bin/python server.py
 Restart=always
 RestartSec=5
+Environment=PORT=8080
 
 [Install]
 WantedBy=multi-user.target
