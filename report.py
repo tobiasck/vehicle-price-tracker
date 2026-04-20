@@ -264,7 +264,11 @@ a:hover {{ text-decoration:underline; }}
         <button class="btn btn-primary" onclick="openAddModal()">
             &#43; Fahrzeug hinzufügen
         </button>
+        <button class="btn btn-outline" onclick="openScheduleModal()">
+            &#9881; Zeitplan
+        </button>
     </div>
+    <div id="nextRunInfo" style="font-size:0.8em;color:var(--text2);margin-top:-20px;margin-bottom:20px;"></div>
     <div class="vehicle-grid" id="vehicleGrid"></div>
 </div>
 
@@ -298,6 +302,52 @@ a:hover {{ text-decoration:underline; }}
         <div class="modal-actions">
             <button class="btn btn-outline" onclick="closeAddModal()">Abbrechen</button>
             <button class="btn btn-primary" onclick="submitAddVehicle()">Hinzufügen</button>
+        </div>
+    </div>
+</div>
+
+<!-- Schedule modal -->
+<div class="modal-overlay" id="scheduleModal">
+    <div class="modal">
+        <h2>&#9881; Automatischer Zeitplan</h2>
+        <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+            <label style="margin:0;flex:1;">Automatisch scrapen</label>
+            <input type="checkbox" id="sch-enabled" style="width:auto;transform:scale(1.4);">
+        </div>
+        <div id="sch-options" style="margin-top:16px;">
+            <div class="form-group">
+                <label>Häufigkeit</label>
+                <select id="sch-frequency" onchange="updateScheduleUI()">
+                    <option value="daily">Täglich</option>
+                    <option value="weekly">Wöchentlich</option>
+                    <option value="interval">Alle X Stunden</option>
+                </select>
+            </div>
+            <div class="form-group" id="sch-weekday-row">
+                <label>Wochentag</label>
+                <select id="sch-weekday">
+                    <option value="0">Montag</option>
+                    <option value="1">Dienstag</option>
+                    <option value="2">Mittwoch</option>
+                    <option value="3">Donnerstag</option>
+                    <option value="4">Freitag</option>
+                    <option value="5">Samstag</option>
+                    <option value="6">Sonntag</option>
+                </select>
+            </div>
+            <div class="form-group" id="sch-time-row">
+                <label>Uhrzeit</label>
+                <input type="time" id="sch-time" value="06:00">
+            </div>
+            <div class="form-group" id="sch-interval-row" style="display:none;">
+                <label>Intervall (Stunden)</label>
+                <input type="number" id="sch-interval" min="1" max="168" value="24">
+            </div>
+        </div>
+        <div id="sch-msg" class="modal-msg"></div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeScheduleModal()">Schließen</button>
+            <button class="btn btn-primary" onclick="saveSchedule()">Speichern</button>
         </div>
     </div>
 </div>
@@ -568,6 +618,87 @@ async function pollStatus() {{
         }}
     }} catch(e) {{}}
 }}
+
+// ── Schedule modal ───────────────────────────────────────────────────────────
+const WEEKDAYS = ['Montag','Dienstag','Mittwoch','Donnerstag','Freitag','Samstag','Sonntag'];
+
+async function openScheduleModal() {{
+    const res = await fetch('/api/schedule');
+    const cfg = await res.json();
+
+    document.getElementById('sch-enabled').checked = cfg.enabled !== false;
+    document.getElementById('sch-frequency').value = cfg.frequency || 'weekly';
+    document.getElementById('sch-weekday').value = cfg.weekday ?? 6;
+    const h = String(cfg.hour ?? 6).padStart(2,'0');
+    const m = String(cfg.minute ?? 0).padStart(2,'0');
+    document.getElementById('sch-time').value = `${{h}}:${{m}}`;
+    document.getElementById('sch-interval').value = cfg.interval_hours ?? 24;
+
+    document.getElementById('sch-msg').className = 'modal-msg';
+    updateScheduleUI();
+    document.getElementById('scheduleModal').classList.add('open');
+}}
+
+function closeScheduleModal() {{
+    document.getElementById('scheduleModal').classList.remove('open');
+}}
+
+document.getElementById('scheduleModal').addEventListener('click', function(e) {{
+    if (e.target === this) closeScheduleModal();
+}});
+
+function updateScheduleUI() {{
+    const freq = document.getElementById('sch-frequency').value;
+    document.getElementById('sch-weekday-row').style.display = freq === 'weekly' ? '' : 'none';
+    document.getElementById('sch-time-row').style.display = freq === 'interval' ? 'none' : '';
+    document.getElementById('sch-interval-row').style.display = freq === 'interval' ? '' : 'none';
+}}
+
+async function saveSchedule() {{
+    const timeParts = document.getElementById('sch-time').value.split(':');
+    const payload = {{
+        enabled: document.getElementById('sch-enabled').checked,
+        frequency: document.getElementById('sch-frequency').value,
+        weekday: parseInt(document.getElementById('sch-weekday').value),
+        hour: parseInt(timeParts[0]),
+        minute: parseInt(timeParts[1]),
+        interval_hours: parseInt(document.getElementById('sch-interval').value),
+    }};
+    const res = await fetch('/api/schedule', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify(payload),
+    }});
+    const data = await res.json();
+    const msg = document.getElementById('sch-msg');
+    if (res.ok) {{
+        msg.className = 'modal-msg success';
+        msg.textContent = 'Gespeichert! ' + formatNextRun(data.next_run);
+        updateNextRunDisplay(data.next_run);
+    }} else {{
+        msg.className = 'modal-msg error';
+        msg.textContent = data.error || 'Fehler beim Speichern.';
+    }}
+}}
+
+function formatNextRun(ts) {{
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    return 'Nächster Run: ' + d.toLocaleString('de-DE', {{
+        weekday:'short', day:'2-digit', month:'2-digit',
+        year:'numeric', hour:'2-digit', minute:'2-digit'
+    }});
+}}
+
+function updateNextRunDisplay(ts) {{
+    const el = document.getElementById('nextRunInfo');
+    if (el) el.textContent = formatNextRun(ts);
+}}
+
+// Load next run info on page load
+fetch('/api/schedule').then(r => r.json()).then(cfg => {{
+    if (cfg.enabled && cfg.next_run) updateNextRunDisplay(cfg.next_run);
+}}).catch(() => {{}});
 
 // ── Admin: add vehicle modal ─────────────────────────────────────────────────
 function openAddModal() {{
