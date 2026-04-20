@@ -156,11 +156,11 @@ class MobileDeScraper:
 
                 total_listings += len(listings)
 
-                has_next = await self._get_next_page(page, browser, page_num)
-                if not has_next:
+                next_page_tab = await self._get_next_page(page, browser, page_num)
+                if not next_page_tab:
                     break
 
-                page = browser.main_tab
+                page = next_page_tab  # use the tab _get_next_page navigated to
                 await asyncio.sleep(random.uniform(MIN_PAGE_DELAY, MAX_PAGE_DELAY))
                 page_num += 1
 
@@ -404,35 +404,39 @@ class MobileDeScraper:
             return "private"
         return None
 
-    async def _get_next_page(self, page, browser, current_page_num) -> bool:
+    async def _get_next_page(self, page, browser, current_page_num):
+        """Navigate to the next page. Returns the new tab on success, None if no more pages."""
         try:
             current_url = page.url
 
-            # Build next-page URL using pageNumber= query param
+            # Build next-page URL — always base on search_url to avoid
+            # accumulating refId/searchId/pageNumber from listing hrefs
             next_page = current_page_num + 1
-            if "pageNumber=" in current_url:
-                next_url = re.sub(r"pageNumber=\d+", f"pageNumber={next_page}", current_url)
+            if "pageNumber=" in self.search_url:
+                next_url = re.sub(r"pageNumber=\d+", f"pageNumber={next_page}", self.search_url)
             else:
-                separator = "&" if "?" in current_url else "?"
-                next_url = f"{current_url}{separator}pageNumber={next_page}"
+                separator = "&" if "?" in self.search_url else "?"
+                next_url = f"{self.search_url}{separator}pageNumber={next_page}"
 
-            page = await browser.get(next_url)
+            logger.info("Navigating to page %d: %s", next_page, next_url)
+            new_tab = await browser.get(next_url)
             await asyncio.sleep(random.uniform(3, 5))
+            await self._wait_for_listings(new_tab)
 
-            # Check if we got listing results on this page
-            for selector in [
-                "a[data-testid^='srx-result-listing-']",
-                "a[href*='/fahrzeuge/details.html']",
-            ]:
-                try:
-                    found = await page.query_selector_all(selector)
-                    if found:
-                        return True
-                except Exception:
-                    continue
+            # Verify there are actual listings on this page
+            count_js = """
+            (() => {
+                const s1 = document.querySelectorAll("a[data-testid^='srx-result-listing-']").length;
+                const s2 = document.querySelectorAll("a[href*='/fahrzeuge/details.html']").length;
+                return Math.max(s1, s2);
+            })()
+            """
+            count = await new_tab.evaluate(count_js)
+            if count and int(count) > 0:
+                return new_tab
 
-            return False
+            return None
 
         except Exception as e:
             logger.warning("Failed to navigate to next page: %s", e)
-            return False
+            return None
