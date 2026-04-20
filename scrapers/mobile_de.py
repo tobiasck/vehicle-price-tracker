@@ -132,21 +132,42 @@ class MobileDeScraper:
         return total_listings
 
     async def _collect_all_via_scroll(self, page) -> list[dict]:
-        """Scroll to the bottom repeatedly until no new listings appear (infinite scroll)."""
+        """Scroll down incrementally until no new listings appear (infinite scroll).
+
+        mobile.de loads ~20 cards per batch. We scroll near the bottom to
+        trigger each batch load, wait for new cards to appear, then repeat.
+        """
         seen_ids = set()
         all_listings = []
         no_new_count = 0
         scroll_round = 0
 
+        # Collect initial cards before any scrolling
+        current = await self._extract_cards(page)
+        for listing in current:
+            pid = listing.get("platform_id")
+            if pid and pid not in seen_ids:
+                seen_ids.add(pid)
+                all_listings.append(listing)
+        logger.info("Initial cards: %d", len(all_listings))
+
         while no_new_count < 3:
             scroll_round += 1
 
-            # Scroll to bottom in human-like steps
-            await self._scroll_to_bottom(page)
-            await asyncio.sleep(random.uniform(2, 3))
+            # Scroll down by one viewport height to trigger lazy loading
+            await page.evaluate("window.scrollBy(0, window.innerHeight * 0.85)")
+            await asyncio.sleep(random.uniform(0.5, 1.0))
 
-            # Extract all currently visible cards
-            current = await self._extract_cards(page)
+            # Wait up to 8s for new cards to appear in DOM
+            prev_count = len(seen_ids)
+            for _ in range(8):
+                current = await self._extract_cards(page)
+                new_found = sum(1 for l in current if l.get("platform_id") not in seen_ids)
+                if new_found > 0:
+                    break
+                await asyncio.sleep(1.0)
+
+            # Count and register new listings
             new_count = 0
             for listing in current:
                 pid = listing.get("platform_id")
@@ -163,29 +184,17 @@ class MobileDeScraper:
             else:
                 no_new_count = 0
 
-            # Safety limit
-            if scroll_round >= 50:
-                logger.warning("Reached scroll limit of 50 rounds")
+            if scroll_round >= 100:
+                logger.warning("Reached scroll limit of 100 rounds")
                 break
 
         return all_listings
 
     async def _scroll_to_bottom(self, page):
-        """Scroll to the bottom of the page in human-like increments."""
-        js = """
-        (() => {
-            return document.body.scrollHeight;
-        })()
-        """
+        """Scroll to the absolute bottom of the page."""
         try:
-            height = await page.evaluate(js)
-            if not height:
-                height = 5000
-            steps = random.randint(4, 7)
-            step_size = int(height) // steps
-            for i in range(steps):
-                await page.evaluate(f"window.scrollBy(0, {step_size + random.randint(-50, 50)})")
-                await asyncio.sleep(random.uniform(0.3, 0.7))
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await asyncio.sleep(random.uniform(0.5, 1.0))
         except Exception as e:
             logger.debug("Scroll error: %s", e)
 
