@@ -1,10 +1,8 @@
 -- Fix mobile.de search URL for BMW Z3 2.8 Vorfacelift.
--- Remove cc= (cubic capacity) filter — it was too restrictive and caused
--- mobile.de to return 0 exact results, showing only "ähnliche Fahrzeuge".
--- ms=3500;69;; = BMW / Z3 (make/model codes).
--- fr=1996:1998 = Erstzulassung 1996-1998 (Vorfacelift years).
--- "Andere Suchkriterien" cards are filtered out in the scraper itself.
+-- Correct make/model codes: ms=3500;51;; = BMW / Z3
+-- (Previous attempts used ms=3500;69;; which maps to BMW M135 — wrong!)
+-- c=Cabrio, cc=2700:2900 (2.8L), fr=1996:1998 (Vorfacelift years).
 
 UPDATE search_configs
-SET search_url = 'https://suchen.mobile.de/fahrzeuge/search.html?dam=0&fr=1996%3A1998&isSearchRequest=true&ms=3500%3B69%3B%3B&s=Car&vc=Car'
+SET search_url = 'https://suchen.mobile.de/fahrzeuge/search.html?isSearchRequest=true&s=Car&vc=Car&dam=false&fr=1996%3A1998&ms=3500%3B51%3B%3B&c=Cabrio&cc=2700%3A2900'
 WHERE platform = 'mobile_de';
