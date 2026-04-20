@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import random
@@ -259,8 +260,9 @@ class MobileDeScraper:
         unreliable per-element nodriver attribute access."""
         listings = []
 
-        # Note: nodriver evaluate() runs the expression as-is via Runtime.evaluate,
-        # so we need an IIFE — a bare arrow function is never called.
+        # nodriver's Runtime.evaluate does not reliably serialise arrays of
+        # objects back to Python. Use JSON.stringify inside the browser and
+        # parse the resulting string on the Python side.
         js = """
         (() => {
             const selectors = [
@@ -272,16 +274,20 @@ class MobileDeScraper:
                 cards = Array.from(document.querySelectorAll(sel));
                 if (cards.length > 0) break;
             }
-            return cards.map(c => ({
+            return JSON.stringify(cards.map(c => ({
                 href: c.href || c.getAttribute('href') || '',
-                text: c.textContent || ''
-            }));
+                text: (c.textContent || '').trim().slice(0, 2000)
+            })));
         })()
         """
         try:
-            raw_cards = await page.evaluate(js)
+            json_str = await page.evaluate(js)
+            if not json_str:
+                logger.warning("JS evaluation returned empty")
+                return listings
+            raw_cards = json.loads(json_str)
         except Exception as e:
-            logger.warning("JS evaluation failed: %s", e)
+            logger.warning("JS evaluation/parse failed: %s", e)
             return listings
 
         if not raw_cards:
