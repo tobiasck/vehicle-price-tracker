@@ -62,9 +62,27 @@ def get_vehicle_stats(conn):
 
 
 def get_current_listings(conn, vehicle_name):
+    """Return only listings seen in the most recent successful scrape run.
+    This ensures sold/removed vehicles disappear from the table after the
+    next scrape."""
     with conn.cursor() as cur:
+        # Find the latest successful run for this vehicle (any platform)
         cur.execute("""
-            SELECT DISTINCT ON (l.platform_id)
+            SELECT sr.id
+            FROM scrape_runs sr
+            JOIN search_configs sc ON sc.id = sr.search_config_id
+            JOIN vehicles v ON v.id = sc.vehicle_id
+            WHERE v.name = %s AND sr.status = 'success'
+            ORDER BY sr.started_at DESC
+            LIMIT 1
+        """, (vehicle_name,))
+        row = cur.fetchone()
+        if not row:
+            return []
+        latest_run_id = row[0]
+
+        cur.execute("""
+            SELECT
                 ls.price_cents,
                 ls.mileage_km,
                 ls.year,
@@ -77,9 +95,11 @@ def get_current_listings(conn, vehicle_name):
             JOIN listings l ON l.id = ls.listing_id
             JOIN search_configs sc ON sc.id = l.search_config_id
             JOIN vehicles v ON v.id = sc.vehicle_id
-            WHERE v.name = %s AND ls.price_cents IS NOT NULL
-            ORDER BY l.platform_id, ls.scraped_at DESC
-        """, (vehicle_name,))
+            WHERE v.name = %s
+              AND ls.scrape_run_id = %s
+              AND ls.price_cents IS NOT NULL
+            ORDER BY ls.price_cents ASC
+        """, (vehicle_name, latest_run_id))
         columns = [desc[0] for desc in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
