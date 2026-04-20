@@ -243,10 +243,18 @@ class MobileDeScraper:
                 cards = Array.from(document.querySelectorAll(sel));
                 if (cards.length > 0) break;
             }
-            return JSON.stringify(cards.map(c => ({
-                href: c.href || c.getAttribute('href') || '',
-                text: (c.textContent || '').trim().slice(0, 2000)
-            })));
+            return JSON.stringify(cards.map(c => {
+                // Extract price directly from its dedicated element to avoid
+                // engine displacement (e.g. "2.8") merging with price digits
+                // in the raw textContent (e.g. "2.810.399" instead of "10.399")
+                const priceEl = c.querySelector('[data-testid="price-label"]');
+                const price = priceEl ? priceEl.textContent.trim() : '';
+                return {
+                    href: c.href || c.getAttribute('href') || '',
+                    text: (c.textContent || '').trim().slice(0, 2000),
+                    price_text: price
+                };
+            }));
         })()
         """
         try:
@@ -261,7 +269,11 @@ class MobileDeScraper:
         listings = []
         for card in raw_cards:
             try:
-                listing = self._parse_card_data(card.get("href", ""), card.get("text", ""))
+                listing = self._parse_card_data(
+                    card.get("href", ""),
+                    card.get("text", ""),
+                    card.get("price_text", ""),
+                )
                 if listing:
                     listings.append(listing)
             except Exception as e:
@@ -269,7 +281,7 @@ class MobileDeScraper:
 
         return listings
 
-    def _parse_card_data(self, href: str, text: str) -> dict | None:
+    def _parse_card_data(self, href: str, text: str, price_text: str = "") -> dict | None:
         if not href or not text.strip():
             return None
 
@@ -286,11 +298,18 @@ class MobileDeScraper:
         if "Andere Suchkriterien" in text:
             return None
 
+        # Use the dedicated price element text if available — avoids the
+        # engine displacement "2.8" merging with the price in raw textContent
+        # (e.g. "Roadster 2.810.399 €" instead of the real "10.399 €")
+        price_cents = self._extract_price(price_text) if price_text else None
+        if price_cents is None:
+            price_cents = self._extract_price(text)
+
         return {
             "platform_id": platform_id,
             "listing_url": listing_url,
             "title": self._extract_title(text),
-            "price_cents": self._extract_price(text),
+            "price_cents": price_cents,
             "mileage_km": self._extract_mileage(text),
             "year": self._extract_year(text),
             "location": self._extract_location(text),
