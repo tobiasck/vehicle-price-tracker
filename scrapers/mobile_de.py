@@ -97,9 +97,9 @@ class MobileDeScraper:
 
             await self._dismiss_consent(page)
 
-            # Step 3: Collect all listings via infinite scroll
-            logger.info("Step 3: Scrolling to collect all listings")
-            all_listings = await self._collect_all_via_scroll(page)
+            # Step 3: Collect all listings across all pages
+            logger.info("Step 3: Collecting listings across all pages")
+            all_listings = await self._collect_all_pages(page)
             logger.info("Collected %d unique listings total", len(all_listings))
 
             if self.debug:
@@ -131,43 +131,23 @@ class MobileDeScraper:
 
         return total_listings
 
-    async def _collect_all_via_scroll(self, page) -> list[dict]:
-        """Scroll down incrementally until no new listings appear (infinite scroll).
+    async def _collect_all_pages(self, page) -> list[dict]:
+        """Collect listings from all pages using the Weiter (Next) button.
 
-        mobile.de loads ~20 cards per batch. We scroll near the bottom to
-        trigger each batch load, wait for new cards to appear, then repeat.
+        mobile.de uses classic button pagination — data-testid="pagination:next".
+        The page counter span shows e.g. "1/3" so we know total pages.
         """
         seen_ids = set()
         all_listings = []
-        no_new_count = 0
-        scroll_round = 0
+        page_num = 1
 
-        # Collect initial cards before any scrolling
-        current = await self._extract_cards(page)
-        for listing in current:
-            pid = listing.get("platform_id")
-            if pid and pid not in seen_ids:
-                seen_ids.add(pid)
-                all_listings.append(listing)
-        logger.info("Initial cards: %d", len(all_listings))
+        while True:
+            # Scroll down so all cards on the current page render
+            await self._human_scroll_full(page)
+            await asyncio.sleep(random.uniform(1.5, 2.5))
 
-        while no_new_count < 3:
-            scroll_round += 1
-
-            # Scroll down by one viewport height to trigger lazy loading
-            await page.evaluate("window.scrollBy(0, window.innerHeight * 0.85)")
-            await asyncio.sleep(random.uniform(0.5, 1.0))
-
-            # Wait up to 8s for new cards to appear in DOM
-            prev_count = len(seen_ids)
-            for _ in range(8):
-                current = await self._extract_cards(page)
-                new_found = sum(1 for l in current if l.get("platform_id") not in seen_ids)
-                if new_found > 0:
-                    break
-                await asyncio.sleep(1.0)
-
-            # Count and register new listings
+            # Collect cards on this page
+            current = await self._extract_cards(page)
             new_count = 0
             for listing in current:
                 pid = listing.get("platform_id")
@@ -176,25 +156,77 @@ class MobileDeScraper:
                     all_listings.append(listing)
                     new_count += 1
 
-            logger.info("Scroll round %d: %d new listings (%d total)",
-                        scroll_round, new_count, len(all_listings))
+            # Read page counter e.g. "2/3"
+            total_pages = await self._get_total_pages(page)
+            logger.info("Page %d/%s: %d new listings (%d total)",
+                        page_num, total_pages or "?", new_count, len(all_listings))
 
-            if new_count == 0:
-                no_new_count += 1
-            else:
-                no_new_count = 0
+            if self.debug:
+                await self._save_debug(page, f"page_{page_num}")
 
-            if scroll_round >= 100:
-                logger.warning("Reached scroll limit of 100 rounds")
+            # Check if there is a next page button that is not disabled
+            has_next = await self._click_next_page(page)
+            if not has_next:
+                logger.info("No more pages — done")
+                break
+
+            page_num += 1
+            # Wait for the new page's cards to load
+            await asyncio.sleep(random.uniform(3, 5))
+
+            if page_num > 20:  # safety limit
+                logger.warning("Reached page limit of 20")
                 break
 
         return all_listings
 
-    async def _scroll_to_bottom(self, page):
-        """Scroll to the absolute bottom of the page."""
+    async def _get_total_pages(self, page) -> str | None:
+        """Read the page counter span, e.g. '1/3' → returns '3'."""
+        js = """
+        (() => {
+            const el = document.querySelector('[data-testid="srp-pagination"] span');
+            return el ? el.textContent.trim() : null;
+        })()
+        """
         try:
+            text = await page.evaluate(js)
+            if text and "/" in str(text):
+                return str(text).split("/")[1]
+        except Exception:
+            pass
+        return None
+
+    async def _click_next_page(self, page) -> bool:
+        """Click the Weiter button. Returns True if clicked, False if not found/disabled."""
+        js = """
+        (() => {
+            const btn = document.querySelector('button[data-testid="pagination:next"]');
+            if (!btn) return 'not_found';
+            if (btn.disabled) return 'disabled';
+            btn.click();
+            return 'clicked';
+        })()
+        """
+        try:
+            result = await page.evaluate(js)
+            logger.info("Pagination next: %s", result)
+            return result == "clicked"
+        except Exception as e:
+            logger.warning("Failed to click next page: %s", e)
+            return False
+
+    async def _human_scroll_full(self, page):
+        """Scroll through the full page to ensure all cards are rendered."""
+        try:
+            height = await page.evaluate("document.body.scrollHeight") or 5000
+            steps = random.randint(5, 8)
+            step = int(height) // steps
+            for _ in range(steps):
+                await page.evaluate(f"window.scrollBy(0, {step})")
+                await asyncio.sleep(random.uniform(0.3, 0.6))
+            # Scroll back to top so pagination button is visible
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await asyncio.sleep(random.uniform(0.5, 1.0))
+            await asyncio.sleep(0.5)
         except Exception as e:
             logger.debug("Scroll error: %s", e)
 
