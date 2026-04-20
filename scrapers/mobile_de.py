@@ -128,7 +128,8 @@ class MobileDeScraper:
             await self._dismiss_consent(page)
 
             page_num = 1
-            while True:
+            MAX_PAGES = 20
+            while page_num <= MAX_PAGES:
                 logger.info("Parsing page %d", page_num)
 
                 # Wait for React to render listing cards (SPA — DOM is built client-side)
@@ -323,6 +324,11 @@ class MobileDeScraper:
         platform_id = match.group(1)
 
         if not text.strip():
+            return None
+
+        # Skip "ähnliche Fahrzeuge" — mobile.de shows these when no exact
+        # results exist. They are marked with "Andere Suchkriterien geändert".
+        if "Andere Suchkriterien" in text or "andere suchkriterien" in text.lower():
             return None
 
         return {
