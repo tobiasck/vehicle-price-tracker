@@ -141,6 +141,34 @@ def serialize_listings(conn, vehicles):
     return result
 
 
+def get_vehicle_configs(conn):
+    """Return vehicles with their search configs for the admin UI."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT v.id, v.name, v.description,
+                   sc.id AS config_id, sc.platform, sc.search_url, sc.active
+            FROM vehicles v
+            LEFT JOIN search_configs sc ON sc.vehicle_id = v.id
+            ORDER BY v.name, sc.platform
+        """)
+        columns = [desc[0] for desc in cur.description]
+        rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+    vehicles = {}
+    for r in rows:
+        vid = r["id"]
+        if vid not in vehicles:
+            vehicles[vid] = {
+                "id": vid, "name": r["name"], "description": r["description"] or "",
+                "configs": [],
+            }
+        if r["config_id"] is not None:
+            vehicles[vid]["configs"].append({
+                "id": r["config_id"], "platform": r["platform"],
+                "search_url": r["search_url"], "active": r["active"],
+            })
+    return list(vehicles.values())
+
+
 def generate_html(conn, stats, vehicles):
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     stats_json = json.dumps(serialize_stats(stats))
@@ -148,6 +176,7 @@ def generate_html(conn, stats, vehicles):
     vehicles_json = json.dumps([{"name": v["name"], "description": v["description"],
                                   "total_listings": int(v["total_listings"]),
                                   "slug": slugify(v["name"])} for v in vehicles])
+    vehicle_configs_json = json.dumps(get_vehicle_configs(conn))
 
     return f"""<!DOCTYPE html>
 <html lang="de">
@@ -180,6 +209,10 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-seri
 .vehicle-card p {{ color:var(--text2); font-size:0.9em; }}
 .vehicle-card .stat {{ display:inline-block; background:var(--bg2); padding:4px 10px;
                       border-radius:6px; font-size:0.8em; margin-top:12px; color:var(--accent); }}
+.vehicle-card .card-actions {{ display:flex; gap:8px; margin-top:14px; }}
+.btn-sm {{ padding:5px 12px; font-size:0.78em; border-radius:5px; }}
+.btn-danger {{ background:#b71c1c; color:#fff; }}
+.btn-danger:hover {{ background:#d32f2f; }}
 
 /* Admin buttons */
 .btn {{ display:inline-flex; align-items:center; gap:6px; padding:9px 18px; border-radius:7px;
@@ -372,6 +405,60 @@ a:hover {{ text-decoration:underline; }}
     </div>
 </div>
 
+<!-- Edit vehicle modal -->
+<div class="modal-overlay" id="editModal">
+    <div class="modal">
+        <h2>&#9998; Fahrzeug bearbeiten</h2>
+        <input type="hidden" id="edit-vehicle-id">
+        <input type="hidden" id="edit-config-id">
+        <div class="form-group">
+            <label>Name *</label>
+            <input id="edit-name" type="text">
+        </div>
+        <div class="form-group">
+            <label>Beschreibung</label>
+            <input id="edit-desc" type="text">
+        </div>
+        <div class="form-group">
+            <label>Plattform</label>
+            <select id="edit-platform">
+                <option value="mobile_de">mobile.de</option>
+                <option value="autoscout24">AutoScout24</option>
+                <option value="kleinanzeigen">Kleinanzeigen</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Such-URL</label>
+            <textarea id="edit-url" style="min-height:80px;"></textarea>
+        </div>
+        <div id="edit-msg" class="modal-msg"></div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="closeEditModal()">Abbrechen</button>
+            <button class="btn btn-primary" onclick="submitEditVehicle()">Speichern</button>
+        </div>
+    </div>
+</div>
+
+<!-- Delete vehicle modal -->
+<div class="modal-overlay" id="deleteModal">
+    <div class="modal">
+        <h2>&#128465; Fahrzeug löschen</h2>
+        <input type="hidden" id="delete-vehicle-id">
+        <p id="delete-vehicle-name" style="font-weight:600;color:#fff;margin-bottom:16px;"></p>
+        <p style="color:var(--text2);margin-bottom:20px;font-size:0.9em;">Was soll gelöscht werden?</p>
+        <div id="delete-msg" class="modal-msg"></div>
+        <div class="modal-actions" style="flex-direction:column;gap:10px;">
+            <button class="btn btn-outline" style="width:100%;" onclick="submitDeleteData()">
+                Nur Scrapdaten löschen (Fahrzeug bleibt)
+            </button>
+            <button class="btn btn-danger" style="width:100%;" onclick="submitDeleteVehicle()">
+                Fahrzeug vollständig löschen
+            </button>
+            <button class="btn btn-outline" style="width:100%;margin-top:4px;" onclick="closeDeleteModal()">Abbrechen</button>
+        </div>
+    </div>
+</div>
+
 <!-- Run status bar -->
 <div class="run-status" id="runStatus">
     <div class="run-status-title" id="runStatusTitle">
@@ -384,6 +471,7 @@ a:hover {{ text-decoration:underline; }}
 const STATS = {stats_json};
 const LISTINGS = {listings_json};
 const VEHICLES = {vehicles_json};
+const VEHICLE_CONFIGS = {vehicle_configs_json};
 
 const fmt = n => n != null ? n.toLocaleString('de-DE', {{maximumFractionDigits:0}}) + ' \\u20ac' : '\\u2013';
 const fmtKm = n => n != null ? n.toLocaleString('de-DE') + ' km' : '\\u2013';
@@ -403,6 +491,10 @@ VEHICLES.forEach((v, idx) => {{
         <p>${{v.description || ''}}</p>
         <span class="stat">${{listings.length}} Inserate</span>
         <span class="stat">Median: ${{medianStr}}</span>
+        <div class="card-actions">
+            <button class="btn btn-outline btn-sm" onclick="event.stopPropagation();openEditModal('${{v.name}}')">&#9998; Bearbeiten</button>
+            <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();openDeleteModal('${{v.name}}')">&#128465; Löschen</button>
+        </div>
     `;
     card.onclick = () => showDetail(v.slug, v.name);
     grid.appendChild(card);
@@ -762,6 +854,128 @@ async function submitAddVehicle() {{
     }} else {{
         msg.className = 'modal-msg error';
         msg.textContent = data.error || 'Fehler beim Hinzufügen.';
+    }}
+}}
+
+// ── Admin: edit vehicle modal ─────────────────────────────────────────────────
+function openEditModal(vehicleName) {{
+    const cfg = VEHICLE_CONFIGS.find(v => v.name === vehicleName);
+    if (!cfg) return;
+
+    document.getElementById('edit-vehicle-id').value = cfg.id;
+    document.getElementById('edit-name').value = cfg.name;
+    document.getElementById('edit-desc').value = cfg.description || '';
+
+    // Use first config for platform/url
+    const firstConfig = cfg.configs && cfg.configs[0];
+    document.getElementById('edit-config-id').value = firstConfig ? firstConfig.id : '';
+    document.getElementById('edit-platform').value = firstConfig ? firstConfig.platform : 'mobile_de';
+    document.getElementById('edit-url').value = firstConfig ? firstConfig.search_url : '';
+
+    document.getElementById('edit-msg').className = 'modal-msg';
+    document.getElementById('editModal').classList.add('open');
+}}
+
+function closeEditModal() {{
+    document.getElementById('editModal').classList.remove('open');
+}}
+
+document.getElementById('editModal').addEventListener('click', function(e) {{
+    if (e.target === this) closeEditModal();
+}});
+
+async function submitEditVehicle() {{
+    const vehicleId = parseInt(document.getElementById('edit-vehicle-id').value);
+    const configId = document.getElementById('edit-config-id').value;
+    const name = document.getElementById('edit-name').value.trim();
+    const desc = document.getElementById('edit-desc').value.trim();
+    const platform = document.getElementById('edit-platform').value;
+    const url = document.getElementById('edit-url').value.trim();
+    const msg = document.getElementById('edit-msg');
+
+    if (!name) {{
+        msg.className = 'modal-msg error';
+        msg.textContent = 'Name ist ein Pflichtfeld.';
+        return;
+    }}
+
+    const res = await fetch('/api/vehicle/edit', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{
+            vehicle_id: vehicleId,
+            name, description: desc,
+            config_id: configId ? parseInt(configId) : null,
+            platform, search_url: url
+        }})
+    }});
+    const data = await res.json();
+
+    if (res.ok) {{
+        msg.className = 'modal-msg success';
+        msg.textContent = 'Gespeichert! Seite wird neu geladen...';
+        setTimeout(() => location.reload(), 1500);
+    }} else {{
+        msg.className = 'modal-msg error';
+        msg.textContent = data.error || 'Fehler beim Speichern.';
+    }}
+}}
+
+// ── Admin: delete vehicle modal ───────────────────────────────────────────────
+function openDeleteModal(vehicleName) {{
+    const cfg = VEHICLE_CONFIGS.find(v => v.name === vehicleName);
+    if (!cfg) return;
+    document.getElementById('delete-vehicle-id').value = cfg.id;
+    document.getElementById('delete-vehicle-name').textContent = cfg.name;
+    document.getElementById('delete-msg').className = 'modal-msg';
+    document.getElementById('deleteModal').classList.add('open');
+}}
+
+function closeDeleteModal() {{
+    document.getElementById('deleteModal').classList.remove('open');
+}}
+
+document.getElementById('deleteModal').addEventListener('click', function(e) {{
+    if (e.target === this) closeDeleteModal();
+}});
+
+async function submitDeleteData() {{
+    const vehicleId = parseInt(document.getElementById('delete-vehicle-id').value);
+    const msg = document.getElementById('delete-msg');
+    const res = await fetch('/api/vehicle/delete-data', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{vehicle_id: vehicleId}})
+    }});
+    const data = await res.json();
+    if (res.ok) {{
+        msg.className = 'modal-msg success';
+        msg.textContent = 'Scrapdaten gelöscht! Seite wird neu geladen...';
+        setTimeout(() => location.reload(), 1500);
+    }} else {{
+        msg.className = 'modal-msg error';
+        msg.textContent = data.error || 'Fehler beim Löschen.';
+    }}
+}}
+
+async function submitDeleteVehicle() {{
+    const vehicleId = parseInt(document.getElementById('delete-vehicle-id').value);
+    const name = document.getElementById('delete-vehicle-name').textContent;
+    if (!confirm(`"${{name}}" vollständig löschen inkl. aller Daten und Konfiguration?`)) return;
+    const msg = document.getElementById('delete-msg');
+    const res = await fetch('/api/vehicle/delete', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{vehicle_id: vehicleId}})
+    }});
+    const data = await res.json();
+    if (res.ok) {{
+        msg.className = 'modal-msg success';
+        msg.textContent = 'Fahrzeug gelöscht! Seite wird neu geladen...';
+        setTimeout(() => location.reload(), 1500);
+    }} else {{
+        msg.className = 'modal-msg error';
+        msg.textContent = data.error || 'Fehler beim Löschen.';
     }}
 }}
 </script>

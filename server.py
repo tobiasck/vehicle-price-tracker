@@ -175,6 +175,42 @@ def _do_scrape_run(target=None):
 
 # ── Vehicle management ───────────────────────────────────────────────────────
 
+def _get_vehicles():
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT v.id, v.name, v.description,
+                       sc.id AS config_id, sc.platform, sc.search_url, sc.active
+                FROM vehicles v
+                LEFT JOIN search_configs sc ON sc.vehicle_id = v.id
+                ORDER BY v.name, sc.platform
+            """)
+            columns = [desc[0] for desc in cur.description]
+            rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+        # Group by vehicle
+        vehicles = {}
+        for r in rows:
+            vid = r["id"]
+            if vid not in vehicles:
+                vehicles[vid] = {
+                    "id": vid,
+                    "name": r["name"],
+                    "description": r["description"],
+                    "configs": [],
+                }
+            if r["config_id"] is not None:
+                vehicles[vid]["configs"].append({
+                    "id": r["config_id"],
+                    "platform": r["platform"],
+                    "search_url": r["search_url"],
+                    "active": r["active"],
+                })
+        return list(vehicles.values())
+    finally:
+        conn.close()
+
+
 def _add_vehicle(name, description, platform, search_url):
     conn = get_connection()
     try:
@@ -195,6 +231,80 @@ def _add_vehicle(name, description, platform, search_url):
             conn.commit()
             logger.info("Added vehicle '%s' on %s", name, platform)
             return vehicle_id
+    finally:
+        conn.close()
+
+
+def _edit_vehicle(vehicle_id, name, description, config_id, platform, search_url):
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE vehicles SET name = %s, description = %s WHERE id = %s",
+                (name.strip(), description.strip(), vehicle_id),
+            )
+            if config_id:
+                cur.execute(
+                    "UPDATE search_configs SET platform = %s, search_url = %s WHERE id = %s",
+                    (platform.strip(), search_url.strip(), config_id),
+                )
+            conn.commit()
+            logger.info("Edited vehicle id=%d", vehicle_id)
+    finally:
+        conn.close()
+
+
+def _delete_vehicle_data(vehicle_id):
+    """Delete all scraped data for a vehicle, keeping the vehicle + search_configs."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            # Delete snapshots first (FK references listings + scrape_runs)
+            cur.execute("""
+                DELETE FROM listing_snapshots
+                WHERE listing_id IN (
+                    SELECT l.id FROM listings l
+                    JOIN search_configs sc ON sc.id = l.search_config_id
+                    WHERE sc.vehicle_id = %s
+                )
+            """, (vehicle_id,))
+            # Delete scrape_run snapshots via scrape_run FK
+            cur.execute("""
+                DELETE FROM listing_snapshots
+                WHERE scrape_run_id IN (
+                    SELECT sr.id FROM scrape_runs sr
+                    JOIN search_configs sc ON sc.id = sr.search_config_id
+                    WHERE sc.vehicle_id = %s
+                )
+            """, (vehicle_id,))
+            cur.execute("""
+                DELETE FROM listings
+                WHERE search_config_id IN (
+                    SELECT id FROM search_configs WHERE vehicle_id = %s
+                )
+            """, (vehicle_id,))
+            cur.execute("""
+                DELETE FROM scrape_runs
+                WHERE search_config_id IN (
+                    SELECT id FROM search_configs WHERE vehicle_id = %s
+                )
+            """, (vehicle_id,))
+            conn.commit()
+            logger.info("Deleted scraped data for vehicle id=%d", vehicle_id)
+    finally:
+        conn.close()
+
+
+def _delete_vehicle(vehicle_id):
+    """Delete a vehicle entirely including its search configs and all scraped data."""
+    _delete_vehicle_data(vehicle_id)
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM search_configs WHERE vehicle_id = %s", (vehicle_id,))
+            cur.execute("DELETE FROM vehicles WHERE id = %s", (vehicle_id,))
+            conn.commit()
+            logger.info("Deleted vehicle id=%d", vehicle_id)
     finally:
         conn.close()
 
@@ -248,6 +358,10 @@ class Handler(BaseHTTPRequestHandler):
             cfg = load_schedule()
             next_ts = _next_run_ts(cfg) if cfg.get("enabled") else None
             self._send_json(200, {**cfg, "next_run": next_ts})
+            return
+
+        if path == "/api/vehicles":
+            self._send_json(200, _get_vehicles())
             return
 
         if path == "/" or path == "/index.html":
@@ -304,6 +418,59 @@ class Handler(BaseHTTPRequestHandler):
             save_schedule(cfg)
             next_ts = _next_run_ts(cfg) if cfg.get("enabled") else None
             self._send_json(200, {**cfg, "next_run": next_ts})
+
+        elif path == "/api/vehicle/edit":
+            vehicle_id = data.get("vehicle_id")
+            name = data.get("name", "").strip()
+            description = data.get("description", "").strip()
+            config_id = data.get("config_id")
+            platform = data.get("platform", "").strip()
+            search_url = data.get("search_url", "").strip()
+            if not vehicle_id or not name:
+                self._send_json(400, {"error": "vehicle_id und name sind Pflichtfelder"})
+                return
+            try:
+                _edit_vehicle(vehicle_id, name, description, config_id, platform, search_url)
+                subprocess.run(
+                    [VENV_PYTHON, os.path.join(BASE_DIR, "report.py")],
+                    cwd=BASE_DIR, timeout=60,
+                )
+                self._send_json(200, {"status": "ok"})
+            except Exception as e:
+                logger.error("Edit vehicle error: %s", e)
+                self._send_json(500, {"error": str(e)})
+
+        elif path == "/api/vehicle/delete-data":
+            vehicle_id = data.get("vehicle_id")
+            if not vehicle_id:
+                self._send_json(400, {"error": "vehicle_id ist ein Pflichtfeld"})
+                return
+            try:
+                _delete_vehicle_data(vehicle_id)
+                subprocess.run(
+                    [VENV_PYTHON, os.path.join(BASE_DIR, "report.py")],
+                    cwd=BASE_DIR, timeout=60,
+                )
+                self._send_json(200, {"status": "ok"})
+            except Exception as e:
+                logger.error("Delete vehicle data error: %s", e)
+                self._send_json(500, {"error": str(e)})
+
+        elif path == "/api/vehicle/delete":
+            vehicle_id = data.get("vehicle_id")
+            if not vehicle_id:
+                self._send_json(400, {"error": "vehicle_id ist ein Pflichtfeld"})
+                return
+            try:
+                _delete_vehicle(vehicle_id)
+                subprocess.run(
+                    [VENV_PYTHON, os.path.join(BASE_DIR, "report.py")],
+                    cwd=BASE_DIR, timeout=60,
+                )
+                self._send_json(200, {"status": "ok"})
+            except Exception as e:
+                logger.error("Delete vehicle error: %s", e)
+                self._send_json(500, {"error": str(e)})
 
         else:
             self._send_json(404, {"error": "Not found"})

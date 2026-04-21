@@ -141,6 +141,14 @@ class MobileDeScraper:
         all_listings = []
         page_num = 1
 
+        # Determine total pages from page counter on first page load
+        first_total = await self._get_total_pages(page)
+        try:
+            max_pages = min(int(first_total), 200) if first_total else 200
+        except (ValueError, TypeError):
+            max_pages = 200
+        logger.info("Total pages reported: %s (cap: %d)", first_total or "unknown", max_pages)
+
         while True:
             # Scroll down so all cards on the current page render
             await self._human_scroll_full(page)
@@ -156,13 +164,18 @@ class MobileDeScraper:
                     all_listings.append(listing)
                     new_count += 1
 
-            # Read page counter e.g. "2/3"
+            # Read page counter e.g. "2/3" for current display
             total_pages = await self._get_total_pages(page)
             logger.info("Page %d/%s: %d new listings (%d total)",
                         page_num, total_pages or "?", new_count, len(all_listings))
 
             if self.debug:
                 await self._save_debug(page, f"page_{page_num}")
+
+            # Safety cap
+            if page_num >= max_pages:
+                logger.info("Reached page cap of %d — done", max_pages)
+                break
 
             # Check if there is a next page button that is not disabled
             has_next = await self._click_next_page(page)
@@ -173,10 +186,6 @@ class MobileDeScraper:
             page_num += 1
             # Wait for the new page's cards to load
             await asyncio.sleep(random.uniform(3, 5))
-
-            if page_num > 20:  # safety limit
-                logger.warning("Reached page limit of 20")
-                break
 
         return all_listings
 
