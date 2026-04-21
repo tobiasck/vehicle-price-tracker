@@ -141,11 +141,14 @@ class MobileDeScraper:
         all_listings = []
         page_num = 1
 
-        # Read page counter for logging only — do NOT use it as the limit because
-        # mobile.de caps the displayed counter at 50 even if more pages exist.
+        # mobile.de caps pagination at 50 pages (1000 listings) — use the counter value
+        # as the actual limit so we never try to go beyond what mobile.de will serve.
         first_total = await self._get_total_pages(page)
-        max_pages = 200
-        logger.info("Total pages reported by counter: %s (hard cap: %d)", first_total or "unknown", max_pages)
+        try:
+            max_pages = min(int(first_total), 200) if first_total else 200
+        except (ValueError, TypeError):
+            max_pages = 200
+        logger.info("Total pages from counter: %s (will scrape up to %d)", first_total or "unknown", max_pages)
 
         while True:
             # Scroll down so all cards on the current page render
