@@ -70,8 +70,12 @@ def save_schedule(cfg: dict):
     logger.info("Schedule saved: %s", cfg)
 
 
-def _next_run_ts(cfg: dict) -> float:
-    """Return the Unix timestamp of the next scheduled run."""
+def _last_scheduled_ts(cfg: dict) -> float:
+    """Return the Unix timestamp of the most recent PAST scheduled slot.
+
+    The scheduler fires when now >= last_scheduled AND last_run < last_scheduled,
+    i.e. the due slot has arrived but hasn't been served yet.
+    """
     now = datetime.now()
     freq = cfg.get("frequency", "weekly")
     hour = cfg.get("hour", 6)
@@ -79,19 +83,48 @@ def _next_run_ts(cfg: dict) -> float:
 
     if freq == "interval":
         hours = cfg.get("interval_hours", 24)
-        last = _run_state.get("last_run")
-        if last:
-            return last + hours * 3600
+        last_run = cfg.get("last_run")  # persisted in schedule.json
+        if last_run:
+            return last_run + hours * 3600
+        return time.time() - 1  # never run → due immediately
+
+    # daily / weekly: find the most recent past occurrence of HH:MM
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    if freq == "daily":
+        if target > now:          # today's slot is still in the future
+            target -= timedelta(days=1)
+        return target.timestamp()
+
+    # weekly
+    weekday = cfg.get("weekday", 6)
+    days_ago = (now.weekday() - weekday) % 7
+    target -= timedelta(days=days_ago)
+    if target > now:
+        target -= timedelta(days=7)
+    return target.timestamp()
+
+
+def _next_run_ts(cfg: dict) -> float:
+    """Return the Unix timestamp of the NEXT scheduled run (for display only)."""
+    now = datetime.now()
+    freq = cfg.get("frequency", "weekly")
+    hour = cfg.get("hour", 6)
+    minute = cfg.get("minute", 0)
+
+    if freq == "interval":
+        hours = cfg.get("interval_hours", 24)
+        last_run = cfg.get("last_run") or _run_state.get("last_run")
+        if last_run:
+            return last_run + hours * 3600
         return time.time() + hours * 3600
 
-    # daily or weekly: find next occurrence of HH:MM
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if freq == "daily":
         if target <= now:
             target += timedelta(days=1)
         return target.timestamp()
 
-    # weekly
     weekday = cfg.get("weekday", 6)
     days_ahead = (weekday - now.weekday()) % 7
     if days_ahead == 0 and target <= now:
@@ -108,9 +141,17 @@ def _scheduler_loop():
         cfg = load_schedule()
         if not cfg.get("enabled"):
             continue
-        next_ts = _next_run_ts(cfg)
-        if time.time() >= next_ts:
-            logger.info("Scheduled run triggered")
+
+        last_scheduled = _last_scheduled_ts(cfg)
+        # Use persisted last_run from schedule.json (survives restarts)
+        last_run = cfg.get("last_run") or _run_state.get("last_run") or 0
+
+        if time.time() >= last_scheduled and last_run < last_scheduled:
+            logger.info(
+                "Scheduled run triggered — slot: %s, last_run: %s",
+                datetime.fromtimestamp(last_scheduled).strftime("%Y-%m-%d %H:%M"),
+                datetime.fromtimestamp(last_run).strftime("%Y-%m-%d %H:%M") if last_run else "never",
+            )
             with _run_lock:
                 already = _run_state["running"]
             if not already:
@@ -151,9 +192,17 @@ def _do_scrape_run(target=None):
                 if len(_run_state["log"]) > 500:
                     _run_state["log"] = _run_state["log"][-500:]
         proc.wait()
+        now_ts = time.time()
         with _run_lock:
             _run_state["exit_code"] = proc.returncode
-            _run_state["last_run"] = time.time()
+            _run_state["last_run"] = now_ts
+        # Persist last_run so the scheduler survives service restarts
+        try:
+            cfg = load_schedule()
+            cfg["last_run"] = now_ts
+            save_schedule(cfg)
+        except Exception as e:
+            logger.warning("Could not persist last_run: %s", e)
         logger.info("Scrape run finished, exit code %d", proc.returncode)
     except Exception as e:
         logger.error("Scrape run error: %s", e)
